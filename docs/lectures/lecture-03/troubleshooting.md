@@ -34,9 +34,11 @@ Symptom:
 
 Fix:
 
-1. Confirm Docker Desktop uses WSL2 backend.
-2. Reopen folder from local filesystem path (not temporary archive path).
-3. Rebuild/reopen devcontainer.
+1. Run the stack with `make up-superset`, `make up-airflow`, or `make up-all` from inside the devcontainer.
+2. Run `make print-host-workspace` and confirm the resolved path looks like a real host path, not `/workspaces/...`.
+3. Confirm Docker Desktop uses WSL2 backend.
+4. Reopen folder from local filesystem path (not temporary archive path).
+5. Rebuild/reopen devcontainer.
 
 ## 4) Permission denied on mounted files
 

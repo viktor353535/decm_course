@@ -1,13 +1,13 @@
-"""Extraction and transformation logic for Airviro station CSV data."""
+"""Extraction and transformation logic for the Ohuseire monitoring API."""
 
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-import csv
+from dataclasses import dataclass, field
+from datetime import date, datetime, time as day_time, timedelta
 import hashlib
-import io
+import html
+import json
 import re
 import time
 from typing import Callable
@@ -17,7 +17,15 @@ from urllib import error, parse, request
 from .config import Settings
 
 
-DATE_COLUMN_CANDIDATES = ("Kuupäev", "Kuupaev", "Date")
+API_TYPE_BY_SOURCE_TYPE = {
+    "air_quality": "INDICATOR",
+    "pollen": "POLLEN",
+}
+KNOWN_INDICATOR_CODE_ALIASES = {
+    "temp10": "temp",
+    "temp_10": "temp",
+    "temperature_at_10_m": "temp",
+}
 ProgressCallback = Callable[[dict[str, object]], None]
 
 
@@ -38,12 +46,37 @@ class DataQualityError(PipelineError):
 
 
 @dataclass(frozen=True)
+class IndicatorMetadata:
+    """Source indicator metadata discovered from the API."""
+
+    indicator_id: int
+    indicator_code: str
+    indicator_name: str
+
+
+@dataclass(frozen=True)
+class StationMetadata:
+    """Source station metadata discovered from the API."""
+
+    station_id: int
+    station_name: str
+    station_type: str
+    airviro_code: str
+    indicator_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class SourceConfig:
-    """Extraction configuration for one Airviro source."""
+    """Extraction configuration for one lecture source."""
 
     source_key: str
     source_type: str
     station_id: int
+    station_name: str
+    station_airviro_code: str
+    api_type: str
+    ordered_indicator_ids: tuple[int, ...]
+    indicator_metadata_by_id: dict[int, IndicatorMetadata]
     max_window_days: int
     extra_params: dict[str, str]
 
@@ -60,6 +93,7 @@ class SourceRunSummary:
     measurements_upserted: int = 0
     duplicate_measurements: int = 0
     split_events: int = 0
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -75,6 +109,16 @@ class MeasurementRow:
     source_row_hash: str
 
 
+@dataclass(frozen=True)
+class MonitoringApiRow:
+    """One measurement row returned by the monitoring endpoint."""
+
+    measured_at: datetime
+    indicator_id: int
+    raw_value: str
+    value_numeric: float | None
+
+
 def parse_iso_date(raw: str) -> date:
     """Parse yyyy-mm-dd date strings."""
 
@@ -82,7 +126,7 @@ def parse_iso_date(raw: str) -> date:
 
 
 def format_airviro_date(value: date) -> str:
-    """Format dates for Airviro query parameters (dd.mm.yyyy)."""
+    """Format dates for Ohuseire query parameters (dd.mm.yyyy)."""
 
     return value.strftime("%d.%m.%Y")
 
@@ -99,34 +143,203 @@ def date_chunks(start_date: date, end_date: date, max_days: int) -> list[tuple[d
     return windows
 
 
-def get_source_configs(settings: Settings) -> list[SourceConfig]:
-    """Return source definitions used by the ETL."""
+def build_api_url(
+    settings: Settings,
+    endpoint: str,
+    params: dict[str, str] | None = None,
+) -> str:
+    """Build one Ohuseire API URL from endpoint path and query parameters."""
+
+    base_url = settings.airviro_base_url.rstrip("/")
+    url = f"{base_url}/{endpoint.lstrip('/')}"
+    if params:
+        url = f"{url}?{parse.urlencode(params)}"
+    return url
+
+
+def strip_html_tags(raw_value: str | None) -> str:
+    """Convert HTML-rich API fields into readable plain text."""
+
+    if not raw_value:
+        return ""
+
+    without_tags = re.sub(r"<[^>]*>", "", raw_value)
+    cleaned = without_tags.replace("<", "").replace(">", "")
+    return html.unescape(cleaned).strip()
+
+
+def normalize_indicator_name(raw_name: str) -> str:
+    """Create stable ascii indicator codes from API metadata."""
+
+    normalized = unicodedata.normalize("NFKD", raw_name)
+    ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
+    ascii_name = ascii_name.replace("%", "pct").replace(".", "_")
+    ascii_name = re.sub(r"[^a-zA-Z0-9]+", "_", ascii_name).strip("_").lower()
+    if not ascii_name:
+        return "unknown_indicator"
+    if ascii_name[0].isdigit():
+        return f"i_{ascii_name}"
+    return KNOWN_INDICATOR_CODE_ALIASES.get(ascii_name, ascii_name)
+
+
+def build_indicator_metadata(raw_item: dict[str, object]) -> IndicatorMetadata:
+    """Map API indicator metadata to stable lecture indicator fields."""
+
+    indicator_id = int(raw_item["id"])
+    formula_text = strip_html_tags(str(raw_item.get("formula") or ""))
+    name_text = strip_html_tags(str(raw_item.get("name") or ""))
+    code_seed = formula_text or name_text or f"indicator_{indicator_id}"
+    indicator_code = normalize_indicator_name(code_seed)
+    indicator_name = name_text or formula_text or code_seed
+    return IndicatorMetadata(
+        indicator_id=indicator_id,
+        indicator_code=indicator_code,
+        indicator_name=indicator_name,
+    )
+
+
+def fetch_json_payload(settings: Settings, url: str) -> object:
+    """Fetch one JSON payload from the live Ohuseire API."""
+
+    last_error: Exception | None = None
+    for attempt in range(1, settings.request_retries + 1):
+        try:
+            with request.urlopen(url, timeout=settings.request_timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8-sig"))
+        except (error.HTTPError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_error = exc
+            if attempt == settings.request_retries:
+                break
+            time.sleep(2**attempt)
+
+    raise PipelineError(f"Failed to fetch API metadata from {url}: {last_error}")
+
+
+def fetch_station_catalog(settings: Settings) -> dict[int, StationMetadata]:
+    """Fetch station metadata keyed by station id."""
+
+    url = build_api_url(settings, f"station/{settings.airviro_locale}")
+    payload = fetch_json_payload(settings, url)
+    if not isinstance(payload, dict) or not isinstance(payload.get("features"), list):
+        raise PipelineError("Station API returned an unexpected payload shape")
+
+    catalog: dict[int, StationMetadata] = {}
+    for feature in payload["features"]:
+        if not isinstance(feature, dict):
+            continue
+
+        properties = feature.get("properties")
+        if not isinstance(properties, dict):
+            continue
+
+        try:
+            station_id = int(feature["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        indicator_ids_raw = properties.get("indicators") or []
+        if not isinstance(indicator_ids_raw, list):
+            indicator_ids_raw = []
+
+        indicator_ids = tuple(
+            int(value)
+            for value in indicator_ids_raw
+            if isinstance(value, (int, float, str)) and str(value).strip()
+        )
+        catalog[station_id] = StationMetadata(
+            station_id=station_id,
+            station_name=str(properties.get("name") or f"station_{station_id}").strip(),
+            station_type=str(properties.get("type") or "").strip(),
+            airviro_code=str(properties.get("airviro_code") or "").strip(),
+            indicator_ids=indicator_ids,
+        )
+
+    return catalog
+
+
+def fetch_indicator_catalog(
+    settings: Settings,
+    api_type: str,
+) -> dict[int, IndicatorMetadata]:
+    """Fetch indicator metadata for one API type."""
+
+    url = build_api_url(
+        settings,
+        f"indicator/{settings.airviro_locale}",
+        params={"type": api_type},
+    )
+    payload = fetch_json_payload(settings, url)
+    if not isinstance(payload, list):
+        raise PipelineError(f"Indicator API returned unexpected payload for type={api_type}")
+
+    catalog: dict[int, IndicatorMetadata] = {}
+    for item in payload:
+        if not isinstance(item, dict) or "id" not in item:
+            continue
+        metadata = build_indicator_metadata(item)
+        catalog[metadata.indicator_id] = metadata
+    return catalog
+
+
+def get_source_configs(
+    settings: Settings,
+    requested_source_keys: set[str] | None = None,
+) -> list[SourceConfig]:
+    """Return source definitions discovered from the live API."""
 
     sources: list[SourceConfig] = []
+    station_catalog = fetch_station_catalog(settings)
+    indicator_catalogs = {
+        api_type: fetch_indicator_catalog(settings, api_type)
+        for api_type in sorted(set(API_TYPE_BY_SOURCE_TYPE.values()))
+    }
 
     for station_id in settings.air_station_ids:
+        source_key = f"air_quality_station_{station_id}"
+        if requested_source_keys is not None and source_key not in requested_source_keys:
+            continue
+        station = station_catalog.get(station_id)
+        if station is None:
+            raise PipelineError(f"Air-quality station {station_id} was not found in station API")
         sources.append(
             SourceConfig(
-                source_key=f"air_quality_station_{station_id}",
+                source_key=source_key,
                 source_type="air_quality",
                 station_id=station_id,
+                station_name=station.station_name,
+                station_airviro_code=station.airviro_code,
+                api_type=API_TYPE_BY_SOURCE_TYPE["air_quality"],
+                ordered_indicator_ids=station.indicator_ids,
+                indicator_metadata_by_id=indicator_catalogs["INDICATOR"],
                 max_window_days=settings.air_quality_window_days,
-                extra_params={},
+                extra_params={
+                    "type": API_TYPE_BY_SOURCE_TYPE["air_quality"],
+                    "indicators": ",".join(str(value) for value in station.indicator_ids),
+                },
             )
         )
 
     for station_id in settings.pollen_station_ids:
+        source_key = f"pollen_station_{station_id}"
+        if requested_source_keys is not None and source_key not in requested_source_keys:
+            continue
+        station = station_catalog.get(station_id)
+        if station is None:
+            raise PipelineError(f"Pollen station {station_id} was not found in station API")
         sources.append(
             SourceConfig(
-                source_key=f"pollen_station_{station_id}",
+                source_key=source_key,
                 source_type="pollen",
                 station_id=station_id,
+                station_name=station.station_name,
+                station_airviro_code=station.airviro_code,
+                api_type=API_TYPE_BY_SOURCE_TYPE["pollen"],
+                ordered_indicator_ids=station.indicator_ids,
+                indicator_metadata_by_id=indicator_catalogs["POLLEN"],
                 max_window_days=settings.pollen_window_days,
                 extra_params={
-                    "filter[type]": "POLLEN",
-                    "filter[cancelSearch]": "",
-                    "filter[submitHit]": "1",
-                    "filter[indicatorIds]": "",
+                    "type": API_TYPE_BY_SOURCE_TYPE["pollen"],
+                    "indicators": ",".join(str(value) for value in station.indicator_ids),
                 },
             )
         )
@@ -142,16 +355,17 @@ def fetch_source_window(
     retry_count: int,
     progress: ProgressCallback | None = None,
 ) -> str:
-    """Fetch one raw CSV response for a date window."""
+    """Fetch one raw monitoring JSON response for a date window."""
 
     params: dict[str, str] = {
-        "filter[stationId]": str(source.station_id),
-        "filter[dateFrom]": format_airviro_date(window_start),
-        "filter[dateUntil]": format_airviro_date(window_end),
+        "stations": str(source.station_id),
+        "range": ",".join(
+            [format_airviro_date(window_start), format_airviro_date(window_end)]
+        ),
     }
     params.update(source.extra_params)
 
-    url = f"{settings.airviro_base_url}?{parse.urlencode(params)}"
+    url = build_api_url(settings, f"monitoring/{settings.airviro_locale}", params)
 
     for attempt in range(1, retry_count + 1):
         try:
@@ -236,22 +450,8 @@ def fetch_source_window(
     raise SourceFetchError("unreachable retry state", retriable=True)
 
 
-def normalize_indicator_code(raw_name: str) -> str:
-    """Create stable ascii indicator codes from source column names."""
-
-    normalized = unicodedata.normalize("NFKD", raw_name)
-    ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
-    ascii_name = ascii_name.replace("%", "pct").replace(".", "_")
-    ascii_name = re.sub(r"[^a-zA-Z0-9]+", "_", ascii_name).strip("_").lower()
-    if not ascii_name:
-        return "unknown_indicator"
-    if ascii_name[0].isdigit():
-        return f"i_{ascii_name}"
-    return ascii_name
-
-
 def parse_localized_numeric(raw_value: str) -> float | None:
-    """Parse values like 3 061, 1,8, empty strings and return numeric or null."""
+    """Parse JSON/string numeric text and return numeric or null."""
 
     value = raw_value.strip().strip('"')
     if value in {"", "-", "NA", "N/A", "null", "NULL"}:
@@ -262,87 +462,163 @@ def parse_localized_numeric(raw_value: str) -> float | None:
     return float(compact)
 
 
-def parse_airviro_csv(
+def should_normalize_staggered_rows(
     source: SourceConfig,
-    csv_text: str,
-) -> tuple[list[MeasurementRow], int, int]:
-    """Parse source CSV text into normalized long-form measurements.
+    rows: list[MonitoringApiRow],
+    window_start: date,
+    window_end: date,
+) -> bool:
+    """Detect older API payloads whose timestamps are staggered by indicator order."""
 
-    Returns:
-      records, rows_read, duplicate_measurement_count
-    """
+    if not rows or not source.ordered_indicator_ids:
+        return False
 
-    reader = csv.DictReader(io.StringIO(csv_text), delimiter=";")
-    if reader.fieldnames is None:
-        raise DataQualityError(f"{source.source_type}: CSV header is missing")
+    expected_slot_count = (window_end - window_start).days + 1
+    if source.source_type != "pollen":
+        expected_slot_count *= 24
 
-    headers = [header.strip().lstrip("\ufeff") for header in reader.fieldnames]
-    date_column = next((h for h in headers if h in DATE_COLUMN_CANDIDATES), None)
-    if date_column is None:
-        raise DataQualityError(
-            f"{source.source_type}: expected date column in {DATE_COLUMN_CANDIDATES}, got {headers}"
+    distinct_timestamps = {row.measured_at for row in rows}
+    return len(distinct_timestamps) > expected_slot_count
+
+
+def normalize_staggered_rows(
+    source: SourceConfig,
+    rows: list[MonitoringApiRow],
+) -> list[MonitoringApiRow]:
+    """Shift older staggered timestamps back to the source grain."""
+
+    indicator_offsets = {
+        indicator_id: index + 1
+        for index, indicator_id in enumerate(source.ordered_indicator_ids)
+    }
+
+    normalized: list[MonitoringApiRow] = []
+    for row in rows:
+        offset_hours = indicator_offsets.get(row.indicator_id)
+        if offset_hours is None:
+            return rows
+        normalized.append(
+            MonitoringApiRow(
+                measured_at=row.measured_at - timedelta(hours=offset_hours),
+                indicator_id=row.indicator_id,
+                raw_value=row.raw_value,
+                value_numeric=row.value_numeric,
+            )
         )
+    return normalized
 
-    indicator_columns = [name for name in headers if name != date_column]
-    if not indicator_columns:
-        return [], 0, 0
 
-    measurements: dict[tuple[str, int, datetime, str], MeasurementRow] = {}
+def parse_monitoring_json(
+    source: SourceConfig,
+    payload_text: str,
+    window_start: date,
+    window_end: date,
+) -> tuple[list[MeasurementRow], int, int]:
+    """Parse monitoring JSON into normalized long-form measurements."""
+
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        raise DataQualityError(f"{source.source_type}: response was not valid JSON") from exc
+
+    if not isinstance(payload, list):
+        raise DataQualityError(f"{source.source_type}: expected JSON list response")
+
     parse_errors: list[str] = []
+    api_rows: list[MonitoringApiRow] = []
     rows_read = 0
-    duplicates = 0
 
-    for row in reader:
+    for item in payload:
         rows_read += 1
-        raw_dt = (row.get(date_column) or "").strip().strip('"')
+        if not isinstance(item, dict):
+            parse_errors.append(f"row {rows_read} is not an object")
+            continue
+
+        raw_dt = str(item.get("measured") or "").strip()
+        raw_value = "" if item.get("value") is None else str(item.get("value")).strip()
 
         try:
-            observed_at = datetime.strptime(raw_dt, "%Y-%m-%d %H:%M")
+            station_id = int(item.get("station"))
+        except (TypeError, ValueError):
+            parse_errors.append(f"row {rows_read} has invalid station id")
+            continue
+        if station_id != source.station_id:
+            parse_errors.append(
+                f"row {rows_read} returned station_id={station_id}, expected {source.station_id}"
+            )
+            continue
+
+        try:
+            measured_at = datetime.strptime(raw_dt, "%Y-%m-%d %H:%M:%S")
         except ValueError:
             parse_errors.append(f"invalid datetime '{raw_dt}' at row {rows_read}")
             continue
 
-        for indicator_name in indicator_columns:
-            raw_value = (row.get(indicator_name) or "").strip()
-            indicator_code = normalize_indicator_code(indicator_name)
+        try:
+            indicator_id = int(item.get("indicator"))
+        except (TypeError, ValueError):
+            parse_errors.append(f"row {rows_read} has invalid indicator id")
+            continue
 
-            try:
-                value_numeric = parse_localized_numeric(raw_value)
-            except ValueError:
-                parse_errors.append(
-                    f"invalid numeric '{raw_value}' for {indicator_name} at {observed_at.isoformat()}"
-                )
-                continue
+        try:
+            value_numeric = parse_localized_numeric(raw_value)
+        except ValueError:
+            parse_errors.append(
+                f"invalid numeric '{raw_value}' for indicator_id={indicator_id} at {raw_dt}"
+            )
+            continue
 
-            source_row_hash = hashlib.sha1(
-                f"{source.source_type}|{source.station_id}|{observed_at.isoformat()}|{indicator_code}|{raw_value}".encode(
-                    "utf-8"
-                )
-            ).hexdigest()
-
-            record = MeasurementRow(
-                source_type=source.source_type,
-                station_id=source.station_id,
-                observed_at=observed_at,
-                indicator_code=indicator_code,
-                indicator_name=indicator_name,
+        api_rows.append(
+            MonitoringApiRow(
+                measured_at=measured_at,
+                indicator_id=indicator_id,
+                raw_value=raw_value,
                 value_numeric=value_numeric,
-                source_row_hash=source_row_hash,
             )
-
-            key = (
-                record.source_type,
-                record.station_id,
-                record.observed_at,
-                record.indicator_code,
-            )
-            if key in measurements:
-                duplicates += 1
-            measurements[key] = record
+        )
 
     if parse_errors:
         preview = "; ".join(parse_errors[:8])
         raise DataQualityError(f"{source.source_type}: {len(parse_errors)} parse errors. {preview}")
+
+    if should_normalize_staggered_rows(source, api_rows, window_start, window_end):
+        api_rows = normalize_staggered_rows(source, api_rows)
+
+    measurements: dict[tuple[str, int, datetime, str], MeasurementRow] = {}
+    duplicates = 0
+
+    for row in api_rows:
+        metadata = source.indicator_metadata_by_id.get(row.indicator_id)
+        if metadata is None:
+            raise DataQualityError(
+                f"{source.source_type}: indicator_id={row.indicator_id} was not found in API metadata"
+            )
+
+        source_row_hash = hashlib.sha1(
+            f"{source.source_type}|{source.station_id}|{row.measured_at.isoformat()}|{metadata.indicator_code}|{row.raw_value}".encode(
+                "utf-8"
+            )
+        ).hexdigest()
+
+        record = MeasurementRow(
+            source_type=source.source_type,
+            station_id=source.station_id,
+            observed_at=row.measured_at,
+            indicator_code=metadata.indicator_code,
+            indicator_name=metadata.indicator_name,
+            value_numeric=row.value_numeric,
+            source_row_hash=source_row_hash,
+        )
+
+        key = (
+            record.source_type,
+            record.station_id,
+            record.observed_at,
+            record.indicator_code,
+        )
+        if key in measurements:
+            duplicates += 1
+        measurements[key] = record
 
     return list(measurements.values()), rows_read, duplicates
 
@@ -359,7 +635,7 @@ def extract_window_with_split(
 
     summary.windows_requested += 1
     try:
-        csv_text = fetch_source_window(
+        payload_text = fetch_source_window(
             settings=settings,
             source=source,
             window_start=window_start,
@@ -410,10 +686,80 @@ def extract_window_with_split(
         )
         return left + right
 
-    records, rows_read, duplicates = parse_airviro_csv(source, csv_text)
+    records, rows_read, duplicates = parse_monitoring_json(
+        source,
+        payload_text,
+        window_start,
+        window_end,
+    )
     summary.rows_read += rows_read
     summary.duplicate_measurements += duplicates
+    coverage_warning = build_window_coverage_warning(
+        source=source,
+        window_start=window_start,
+        window_end=window_end,
+        records=records,
+    )
+    if coverage_warning is not None:
+        summary.warnings.append(coverage_warning)
+        if progress is not None:
+            progress(
+                {
+                    "event": "coverage_warning",
+                    "source_key": source.source_key,
+                    "source_type": source.source_type,
+                    "window_start": window_start.isoformat(),
+                    "window_end": window_end.isoformat(),
+                    "warning": coverage_warning,
+                }
+            )
     return records
+
+
+def build_window_coverage_warning(
+    *,
+    source: SourceConfig,
+    window_start: date,
+    window_end: date,
+    records: list[MeasurementRow],
+) -> str | None:
+    """Return a non-fatal warning when response timestamps do not reach window bounds."""
+
+    if not records:
+        return (
+            f"{source.source_key}: no timestamps returned for requested window "
+            f"{window_start.isoformat()}..{window_end.isoformat()}"
+        )
+
+    first_observed_at = min(record.observed_at for record in records)
+    last_observed_at = max(record.observed_at for record in records)
+
+    expected_start = datetime.combine(window_start, day_time.min)
+    if source.source_type == "pollen":
+        # Pollen observations are treated as daily for completeness reporting.
+        missing_start = first_observed_at.date() > window_start
+        missing_end = last_observed_at.date() < window_end
+    else:
+        expected_end = datetime.combine(window_end, day_time(hour=23))
+        missing_start = first_observed_at > expected_start
+        missing_end = last_observed_at < expected_end
+
+    if not missing_start and not missing_end:
+        return None
+
+    missing_parts: list[str] = []
+    if missing_start:
+        missing_parts.append("start")
+    if missing_end:
+        missing_parts.append("end")
+
+    return (
+        f"{source.source_key}: returned timestamps do not fully cover requested window "
+        f"{window_start.isoformat()}..{window_end.isoformat()} "
+        f"(missing {', '.join(missing_parts)}; "
+        f"first_observed_at={first_observed_at.isoformat(sep=' ', timespec='minutes')}, "
+        f"last_observed_at={last_observed_at.isoformat(sep=' ', timespec='minutes')})"
+    )
 
 
 def build_source_records(

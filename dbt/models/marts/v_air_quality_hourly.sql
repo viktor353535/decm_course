@@ -46,7 +46,9 @@ select
   aq.hum,
   aq.rain,
   aq.press,
-  aq.rad
+  aq.rad,
+  dt.month_short,
+  dt.day_short
 from air_quality as aq
 left join {{ ref('dim_datetime_hour') }} as dt
   on dt.observed_at = aq.observed_at

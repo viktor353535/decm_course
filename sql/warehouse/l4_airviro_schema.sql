@@ -1,10 +1,12 @@
--- Airviro warehouse bootstrap objects.
--- Safe to run repeatedly.
+-- Lecture 4 advanced Airviro ETL warehouse objects.
+-- Safe to rerun for the current Lecture 4 schema shape.
+-- If this schema definition changes during lecture preparation,
+-- reset l4_raw and l4_mart, then run bootstrap again.
 
-CREATE SCHEMA IF NOT EXISTS raw;
-CREATE SCHEMA IF NOT EXISTS mart;
+CREATE SCHEMA IF NOT EXISTS __RAW_SCHEMA__;
+CREATE SCHEMA IF NOT EXISTS __MART_SCHEMA__;
 
-CREATE TABLE IF NOT EXISTS raw.airviro_measurement (
+CREATE TABLE IF NOT EXISTS __RAW_SCHEMA__.airviro_measurement (
   source_type text NOT NULL,
   station_id integer NOT NULL,
   observed_at timestamp without time zone NOT NULL,
@@ -18,12 +20,12 @@ CREATE TABLE IF NOT EXISTS raw.airviro_measurement (
 );
 
 CREATE INDEX IF NOT EXISTS idx_airviro_measurement_observed_at
-  ON raw.airviro_measurement (observed_at);
+  ON __RAW_SCHEMA__.airviro_measurement (observed_at);
 
 CREATE INDEX IF NOT EXISTS idx_airviro_measurement_source_indicator
-  ON raw.airviro_measurement (source_type, indicator_code);
+  ON __RAW_SCHEMA__.airviro_measurement (source_type, indicator_code);
 
-CREATE TABLE IF NOT EXISTS raw.airviro_ingestion_audit (
+CREATE TABLE IF NOT EXISTS __RAW_SCHEMA__.airviro_ingestion_audit (
   ingestion_audit_id bigserial PRIMARY KEY,
   batch_id text NOT NULL,
   source_key text,
@@ -40,26 +42,20 @@ CREATE TABLE IF NOT EXISTS raw.airviro_ingestion_audit (
   created_at timestamp with time zone NOT NULL DEFAULT now()
 );
 
-ALTER TABLE raw.airviro_ingestion_audit
-  ADD COLUMN IF NOT EXISTS source_key text;
-
-ALTER TABLE raw.airviro_ingestion_audit
-  ADD COLUMN IF NOT EXISTS station_id integer;
-
-CREATE TABLE IF NOT EXISTS raw.pipeline_watermark (
+CREATE TABLE IF NOT EXISTS __RAW_SCHEMA__.pipeline_watermark (
   pipeline_name text PRIMARY KEY,
   watermark_date date NOT NULL,
   updated_at timestamp with time zone NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS mart.dim_indicator (
+CREATE TABLE IF NOT EXISTS __MART_SCHEMA__.dim_indicator (
   source_type text NOT NULL,
   indicator_code text NOT NULL,
   indicator_name text NOT NULL,
   PRIMARY KEY (source_type, indicator_code)
 );
 
-CREATE TABLE IF NOT EXISTS mart.dim_datetime_hour (
+CREATE TABLE IF NOT EXISTS __MART_SCHEMA__.dim_datetime_hour (
   observed_at timestamp without time zone PRIMARY KEY,
   date_value date NOT NULL,
   year_number integer NOT NULL,
@@ -75,86 +71,7 @@ CREATE TABLE IF NOT EXISTS mart.dim_datetime_hour (
   day_short text NOT NULL
 );
 
-ALTER TABLE mart.dim_datetime_hour
-  ADD COLUMN IF NOT EXISTS month_short text;
-
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema = 'mart'
-      AND table_name = 'dim_datetime_hour'
-      AND column_name = 'weekday_short'
-  ) AND NOT EXISTS (
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema = 'mart'
-      AND table_name = 'dim_datetime_hour'
-      AND column_name = 'day_short'
-  ) THEN
-    ALTER TABLE mart.dim_datetime_hour RENAME COLUMN weekday_short TO day_short;
-  END IF;
-END $$;
-
-ALTER TABLE mart.dim_datetime_hour
-  ADD COLUMN IF NOT EXISTS day_short text;
-
-UPDATE mart.dim_datetime_hour
-SET
-  month_name = TRIM(TO_CHAR(observed_at, 'Month')),
-  month_short = CASE EXTRACT(MONTH FROM observed_at)::int
-    WHEN 1 THEN '           Jan'
-    WHEN 2 THEN '          Feb'
-    WHEN 3 THEN '         Mar'
-    WHEN 4 THEN '        Apr'
-    WHEN 5 THEN '       May'
-    WHEN 6 THEN '      Jun'
-    WHEN 7 THEN '     Jul'
-    WHEN 8 THEN '    Aug'
-    WHEN 9 THEN '   Sep'
-    WHEN 10 THEN '  Oct'
-    WHEN 11 THEN ' Nov'
-    ELSE 'Dec'
-  END,
-  day_name = TRIM(TO_CHAR(observed_at, 'Dy')),
-  day_short = CASE EXTRACT(ISODOW FROM observed_at)::int
-    WHEN 1 THEN '      Mon'
-    WHEN 2 THEN '     Tue'
-    WHEN 3 THEN '    Wed'
-    WHEN 4 THEN '   Thu'
-    WHEN 5 THEN '  Fri'
-    WHEN 6 THEN ' Sat'
-    ELSE 'Sun'
-  END
-WHERE
-  month_name IS DISTINCT FROM TRIM(TO_CHAR(observed_at, 'Month'))
-  OR month_short IS DISTINCT FROM CASE EXTRACT(MONTH FROM observed_at)::int
-    WHEN 1 THEN '           Jan'
-    WHEN 2 THEN '          Feb'
-    WHEN 3 THEN '         Mar'
-    WHEN 4 THEN '        Apr'
-    WHEN 5 THEN '       May'
-    WHEN 6 THEN '      Jun'
-    WHEN 7 THEN '     Jul'
-    WHEN 8 THEN '    Aug'
-    WHEN 9 THEN '   Sep'
-    WHEN 10 THEN '  Oct'
-    WHEN 11 THEN ' Nov'
-    ELSE 'Dec'
-  END
-  OR day_name IS DISTINCT FROM TRIM(TO_CHAR(observed_at, 'Dy'))
-  OR day_short IS DISTINCT FROM CASE EXTRACT(ISODOW FROM observed_at)::int
-    WHEN 1 THEN '      Mon'
-    WHEN 2 THEN '     Tue'
-    WHEN 3 THEN '    Wed'
-    WHEN 4 THEN '   Thu'
-    WHEN 5 THEN '  Fri'
-    WHEN 6 THEN ' Sat'
-    ELSE 'Sun'
-  END;
-
-CREATE TABLE IF NOT EXISTS mart.dim_wind_direction (
+CREATE TABLE IF NOT EXISTS __MART_SCHEMA__.dim_wind_direction (
   sector_id integer PRIMARY KEY,
   sector_code text NOT NULL UNIQUE,
   sector_name text NOT NULL,
@@ -163,9 +80,9 @@ CREATE TABLE IF NOT EXISTS mart.dim_wind_direction (
   wraps_around boolean NOT NULL
 );
 
-DELETE FROM mart.dim_wind_direction;
+DELETE FROM __MART_SCHEMA__.dim_wind_direction;
 
-INSERT INTO mart.dim_wind_direction (
+INSERT INTO __MART_SCHEMA__.dim_wind_direction (
   sector_id, sector_code, sector_name, min_degree, max_degree, wraps_around
 )
 VALUES
@@ -178,7 +95,7 @@ VALUES
   (7, 'W',  'West',       247.50, 292.50, false),
   (8, 'NW', 'Northwest',  292.50, 337.50, false);
 
-CREATE OR REPLACE VIEW mart.v_airviro_measurements_long AS
+CREATE OR REPLACE VIEW __MART_SCHEMA__.v_airviro_measurements_long AS
 SELECT
   m.source_type,
   m.station_id,
@@ -187,11 +104,9 @@ SELECT
   m.indicator_name,
   m.value_numeric,
   m.extracted_at
-FROM raw.airviro_measurement AS m;
+FROM __RAW_SCHEMA__.airviro_measurement AS m;
 
-DROP VIEW IF EXISTS mart.v_air_quality_hourly;
-
-CREATE VIEW mart.v_air_quality_hourly AS
+CREATE OR REPLACE VIEW __MART_SCHEMA__.v_air_quality_hourly_station_8 AS
 WITH air_quality AS (
   SELECT
     station_id,
@@ -203,17 +118,15 @@ WITH air_quality AS (
     MAX(value_numeric) FILTER (WHERE indicator_code = 'pm10') AS pm10,
     MAX(value_numeric) FILTER (WHERE indicator_code = 'pm2_5') AS pm2_5,
     MAX(value_numeric) FILTER (WHERE indicator_code = 'temp') AS temp,
-    MAX(value_numeric) FILTER (WHERE indicator_code = 'hum') AS hum,
-    MAX(value_numeric) FILTER (WHERE indicator_code = 'rain') AS rain,
-    MAX(value_numeric) FILTER (WHERE indicator_code = 'press') AS press,
-    MAX(value_numeric) FILTER (WHERE indicator_code = 'rad') AS rad,
     MAX(value_numeric) FILTER (WHERE indicator_code = 'wd10') AS wd10,
     MAX(value_numeric) FILTER (WHERE indicator_code = 'ws10') AS ws10
-  FROM raw.airviro_measurement
+  FROM __RAW_SCHEMA__.airviro_measurement
   WHERE source_type = 'air_quality'
+    AND station_id = 8
   GROUP BY station_id, observed_at
 )
 SELECT
+  'lecture4_station_8_only'::text AS dataset_scope,
   aq.station_id,
   aq.observed_at,
   dt.date_value,
@@ -235,29 +148,27 @@ SELECT
   aq.ws10,
   wd.sector_code AS wind_sector,
   wd.sector_name AS wind_sector_name,
-  aq.hum,
-  aq.rain,
-  aq.press,
-  aq.rad,
   dt.month_short,
   dt.day_short
 FROM air_quality AS aq
-LEFT JOIN mart.dim_datetime_hour AS dt
+LEFT JOIN __MART_SCHEMA__.dim_datetime_hour AS dt
   ON dt.observed_at = aq.observed_at
-LEFT JOIN mart.dim_wind_direction AS wd
+LEFT JOIN __MART_SCHEMA__.dim_wind_direction AS wd
   ON (
     (wd.wraps_around IS TRUE AND (aq.wd10 >= wd.min_degree OR aq.wd10 < wd.max_degree))
     OR
     (wd.wraps_around IS FALSE AND aq.wd10 >= wd.min_degree AND aq.wd10 < wd.max_degree)
   );
 
-CREATE OR REPLACE VIEW mart.v_pollen_daily AS
+CREATE OR REPLACE VIEW __MART_SCHEMA__.v_pollen_daily_station_25 AS
 SELECT
+  'lecture4_station_25_only'::text AS dataset_scope,
   m.station_id,
   m.observed_at,
   m.observed_at::date AS observed_date,
   m.indicator_code,
   m.indicator_name,
   m.value_numeric
-FROM raw.airviro_measurement AS m
-WHERE m.source_type = 'pollen';
+FROM __RAW_SCHEMA__.airviro_measurement AS m
+WHERE m.source_type = 'pollen'
+  AND m.station_id = 25;

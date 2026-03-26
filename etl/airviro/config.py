@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import re
 import socket
 import subprocess
 
@@ -59,11 +60,23 @@ def _as_int_tuple(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(values)
 
 
+def _as_identifier(name: str, default: str) -> str:
+    """Parse a SQL identifier-like env value and reject unsafe values."""
+
+    value = os.getenv(name, default).strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise ValueError(
+            f"{name} must be a simple SQL identifier (letters, digits, underscore)"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     """Runtime configuration for extraction and loading."""
 
     airviro_base_url: str
+    airviro_locale: str
     air_station_ids: tuple[int, ...]
     pollen_station_ids: tuple[int, ...]
     request_timeout_seconds: int
@@ -76,21 +89,24 @@ class Settings:
     warehouse_db_password: str
     warehouse_db_port: int
     warehouse_db_host: str
+    airviro_raw_schema: str
+    airviro_mart_schema: str
 
     @classmethod
     def from_env(cls) -> "Settings":
-        air_station_ids = _as_int_tuple("AIRVIRO_AIR_STATION_IDS", ())
+        air_station_ids = _as_int_tuple("AIRVIRO_AIR_STATION_IDS", (8,))
         if not air_station_ids:
             air_station_ids = (_as_int("AIRVIRO_AIR_STATION_ID", 8),)
 
-        pollen_station_ids = _as_int_tuple("AIRVIRO_POLLEN_STATION_IDS", ())
+        pollen_station_ids = _as_int_tuple("AIRVIRO_POLLEN_STATION_IDS", (25,))
         if not pollen_station_ids:
             pollen_station_ids = (_as_int("AIRVIRO_POLLEN_STATION_ID", 25),)
 
         return cls(
             airviro_base_url=os.getenv(
-                "AIRVIRO_BASE_URL", "https://airviro.klab.ee/station/csv"
+                "AIRVIRO_BASE_URL", "https://www.ohuseire.ee/api"
             ).strip(),
+            airviro_locale=os.getenv("AIRVIRO_API_LOCALE", "en").strip() or "en",
             air_station_ids=air_station_ids,
             pollen_station_ids=pollen_station_ids,
             request_timeout_seconds=_as_int("AIRVIRO_TIMEOUT_SECONDS", 45),
@@ -103,6 +119,8 @@ class Settings:
             warehouse_db_password=os.getenv("WAREHOUSE_DB_PASSWORD", "warehouse").strip(),
             warehouse_db_port=_as_int("WAREHOUSE_DB_PORT", 5432),
             warehouse_db_host=os.getenv("WAREHOUSE_DB_HOST", "postgres").strip(),
+            airviro_raw_schema=_as_identifier("AIRVIRO_RAW_SCHEMA", "l4_raw"),
+            airviro_mart_schema=_as_identifier("AIRVIRO_MART_SCHEMA", "l4_mart"),
         )
 
     @property

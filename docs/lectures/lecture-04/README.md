@@ -4,121 +4,331 @@
 
 This lecture is for students who completed Lecture 3 and can already run the repository in a devcontainer.
 
-Goal: implement and explain a complete ETL cycle (extract, transform, load), then visualize curated outputs in Superset.
+Goal: understand ETL by first reading one small Python script end to end, then compare it with the more advanced CLI-based ETL used elsewhere in the repository.
 
 ## Learning Outcomes
 
 After this lecture, students should be able to:
 
-1. Explain ETL stages and map them to this repository.
-2. Run the Python ETL for a bounded historical period.
-3. Validate ingestion results with warehouse status checks.
-4. Connect Superset to the warehouse and create first visuals.
-5. Explain why idempotency and data-quality checks matter.
+1. Explain `extract`, `transform`, and `load` in a concrete Python example.
+2. Run a simple ETL for Tartu air-quality data with a manual date window.
+3. Explain the difference between `replace` and `update` load modes.
+4. Discover lecture source IDs from API metadata instead of guessing them.
+5. Run the advanced Lecture 4 ETL for Tartu air quality and Tartu pollen.
+6. Connect Superset to the warehouse and build first charts from Lecture 4 datasets.
+7. Explain why the advanced ETL uses long-form raw storage, dimensions, and curated serving views.
 
-## Practical Flow (Core Path)
+## Lecture 4 Setup
 
 Run from repo root inside the devcontainer:
 
 ```bash
 make up-superset
 make devcontainer-join-course-network
-make etl-bootstrap
-make etl-backfill-2020-2025
-make warehouse-status
 ```
 
 Lecture 4 intentionally keeps Airflow out of scope.
 Do not run `make up-all` here; Airflow orchestration is introduced in Lecture 5.
 
-Then in Superset:
+Superset:
+- URL: <http://localhost:8088>
+- username: `admin`
+- password: `admin`
 
-1. Open <http://localhost:8088>.
-2. Connect to Postgres warehouse DB.
-3. Use marts for analysis (`mart.v_air_quality_hourly`, `mart.v_pollen_daily`, `mart.v_airviro_measurements_long`).
-4. Build one chart and one dashboard.
+## Part 1: Simple ETL Tutorial
 
-## ETL Stages In This Repository
+We start with one small ETL script and one source:
+- Tartu air-quality station `8`
+- one manually selected date window
+- one output table: `l4_simple.air_quality_station_8_hourly`
 
-1. Extract:
-   - Pull CSV data from Airviro API in bounded date windows.
-   - The extractor starts with larger windows (fewer API calls) and splits only when needed.
-   - Retries are applied for transient fetch failures.
-2. Transform:
-   - Parse datetime values, normalize numeric types, and run integrity checks.
-   - Convert wide CSV rows into long-form measurement records.
-   - Normalize indicator names into stable machine-friendly indicator codes.
-3. Load:
-   - Upsert to `raw.airviro_measurement` with idempotent keys.
-   - Write ingestion audit records for observability and troubleshooting.
-4. Serve:
-   - Refresh curated marts/dimensions in `mart.*` for Superset.
+This keeps the first example small enough to read in one sitting.
+
+### Why Start This Way
+
+The simple ETL is intentionally limited:
+- one script instead of multiple modules;
+- one source instead of multiple stations;
+- one output table instead of raw + marts + audit tables;
+- one explicit choice between `replace` and `update`.
+
+That makes it easier to see what each ETL stage does before introducing more robust engineering patterns.
+
+### Run the Simple ETL
+
+Example: load three days of Tartu air-quality data and replace the target table contents.
+
+```bash
+.venv/bin/python etl/lecture4_simple_air_quality.py --from 2026-03-10 --to 2026-03-12 --load-mode replace
+```
+
+Run the same window again with upsert behavior:
+
+```bash
+.venv/bin/python etl/lecture4_simple_air_quality.py --from 2026-03-10 --to 2026-03-12 --load-mode update
+```
+
+What the two load modes mean:
+- `replace`: truncates `l4_simple.air_quality_station_8_hourly` and reloads the selected window.
+- `update`: inserts new rows and updates existing rows with the same `(station_id, observed_at)` key.
+
+### How the Simple ETL Works
+
+The script lives in:
+- `etl/lecture4_simple_air_quality.py`
+
+Read it from top to bottom and connect each function to the ETL stages:
+
+1. Discover metadata
+   - reads `/api/station/en` to confirm that station `8` is Tartu air quality
+   - reads `/api/indicator/en?type=INDICATOR` to discover which indicator IDs mean `SO2`, `PM10`, `WD10`, and so on
+
+2. Extract
+   - calls `/api/monitoring/en`
+   - requests one explicit window using:
+     - `stations=8`
+     - `type=INDICATOR`
+     - `range=dd.MM.yyyy,dd.MM.yyyy`
+
+3. Transform
+   - parses monitoring JSON rows
+   - normalizes API values into Python floats
+   - corrects older staggered timestamps when the API returns historical rows in indicator order instead of clean hourly timestamps
+   - pivots long-form API rows into one wide hourly row with columns like `so2`, `no2`, `pm10`, `temp`, `wd10`, `ws10`
+
+4. Load
+   - creates schema `l4_simple` and table `air_quality_station_8_hourly` if needed
+   - either truncates and reloads (`replace`) or upserts (`update`)
+
+### Why the Simple Table Is Useful
+
+`l4_simple.air_quality_station_8_hourly` is easy to explain because:
+- one row means one hourly observation for one station;
+- students can inspect the columns directly;
+- the table shape is convenient for first Superset charts.
+
+That simplicity is helpful for the first ETL walkthrough, but it does not scale as well once we add more sources and more operational requirements.
+
+### A Few API Habits Worth Keeping
+
+Even in this simple script, there are a few good habits worth noticing:
+
+1. Start with metadata endpoints
+   - do not hard-code the meaning of station IDs or indicator IDs when the API can describe them.
+
+2. Keep request parameters explicit
+   - store `stations`, `type`, and `range` clearly instead of building mysterious URLs by hand.
+
+3. Use bounded date windows
+   - smaller windows are easier to rerun, easier to debug, and less risky if the source behaves strangely.
+
+4. Validate what came back
+   - if the API returns old historical rows with odd timestamps, the ETL should notice and normalize them before loading.
+
+## Part 2: Advanced CLI ETL
+
+After the simple script, we move to the repository's more advanced Airviro ETL.
+
+Lecture 4 scope for the advanced ETL:
+- Tartu air-quality station `8`
+- Tartu pollen station `25`
+
+Lecture 4 advanced warehouse objects are kept separate from later work:
+- raw layer: `l4_raw.*`
+- serving layer: `l4_mart.*`
+
+### Run the Advanced ETL
+
+Bootstrap the Lecture 4 advanced warehouse objects:
+
+```bash
+make etl-bootstrap
+```
+
+Run one small live lecture window:
+
+```bash
+.venv/bin/python -m etl.airviro.cli run \
+  --from 2026-03-10 \
+  --to 2026-03-12 \
+  --source-key air_quality_station_8 \
+  --source-key pollen_station_25 \
+  --verbose
+```
+
+Check what reached the warehouse:
+
+```bash
+make warehouse-status
+```
+
+Optional larger historical load for more data:
+
+```bash
+make etl-backfill-2020-2025
+```
+
+### What the Advanced ETL Does Better
+
+Compared with the one-file tutorial ETL, the advanced ETL adds:
+
+1. Better source discovery
+   - discovers stations and indicators from API metadata;
+   - keeps source IDs and indicator meanings out of hard-coded business logic as much as possible.
+
+2. Better extraction behavior
+   - bounded date windows;
+   - retries for transient failures;
+   - split-on-failure logic when the source rejects wide windows.
+
+3. Better transformation behavior
+   - keeps the source grain in long form;
+   - normalizes older staggered historical responses before loading;
+   - produces stable machine-friendly indicator codes.
+
+4. Better observability
+   - ingestion audit rows in `l4_raw.airviro_ingestion_audit`;
+   - warehouse status reporting;
+   - warning messages when returned timestamps do not fully cover the requested window.
+
+5. Better serving layer for BI
+   - curated views in `l4_mart.*`;
+   - small reusable dimensions for time, indicator metadata, and wind direction.
+
+## Advanced ETL Stages In This Repository
+
+### Discover
+
+- Read `/api/station/en` to find lecture stations and their indicator lists.
+- Read `/api/indicator/en?...` to map indicator IDs to stable names and codes.
+
+### Extract
+
+- Pull monitoring JSON from `/api/monitoring/en` in bounded windows.
+- Keep `stations`, `type`, `range`, and `indicators` explicit in the request.
+- Retry transient failures.
+- Split retriable failing windows into smaller windows automatically.
+
+### Transform
+
+- Parse monitoring timestamps from JSON.
+- Normalize values into floats.
+- Correct older staggered historical rows when necessary.
+- Keep normalized raw measurements in long form:
+  - one row per `source_type + station_id + observed_at + indicator_code`
+
+### Load
+
+- Upsert to `l4_raw.airviro_measurement`.
+- Record ingestion runs in `l4_raw.airviro_ingestion_audit`.
+- Refresh serving dimensions in `l4_mart.*`.
+
+### Serve
+
+- Expose Superset-friendly views in `l4_mart.*`.
+- Keep air quality and pollen datasets clearly labeled by station in the relation names.
+
+## Dimensional and Ingestion Design Patterns
+
+### Why Long-Form Raw Storage
+
+The current monitoring API already returns one value per indicator and timestamp.
+
+The advanced ETL keeps that same long-form grain in `l4_raw.airviro_measurement` because:
+- different sources can still share one raw table;
+- new indicators can appear without redesigning the raw table;
+- upsert keys remain explicit and stable;
+- later dimensional modeling becomes easier.
+
+### Where the Dimensions Come From
+
+Lecture 4 advanced dimensions come from three places:
+
+1. `l4_mart.dim_indicator`
+   - built from distinct `(source_type, indicator_code, indicator_name)` values loaded into `l4_raw.airviro_measurement`
+   - those names ultimately come from the indicator metadata API
+
+2. `l4_mart.dim_datetime_hour`
+   - built from distinct `observed_at` timestamps loaded into `l4_raw.airviro_measurement`
+
+3. `l4_mart.dim_wind_direction`
+   - static lookup created by the Lecture 4 bootstrap SQL
+   - maps degree ranges into 8 wind sectors (`N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, `NW`)
+
+### Why There Is No Station Dimension Yet
+
+For Lecture 4 we keep the advanced scope narrow:
+- air quality is limited to station `8`
+- pollen is limited to station `25`
+
+That keeps the first dimensional-model discussion focused on time, indicators, and serving views.
+
+In Lecture 5 we can safely expand to more stations and then introduce `dim_station` as part of a clearer star schema.
+
+## Superset Datasets For Lecture 4
+
+Connect Superset to the warehouse database:
+- host: `postgres`
+- port: `5432`
+- database: `warehouse`
+- username: `warehouse`
+- password: `warehouse`
+
+Recommended Lecture 4 datasets:
+
+1. Simple ETL table
+   - `l4_simple.air_quality_station_8_hourly`
+
+2. Advanced ETL views
+   - `l4_mart.v_air_quality_hourly_station_8`
+   - `l4_mart.v_pollen_daily_station_25`
+   - `l4_mart.v_airviro_measurements_long`
+
+Suggested teaching pattern:
+- use the simple table first to show the direct result of one ETL script;
+- then switch to the advanced `l4_mart.*` views to show what a better serving layer looks like.
 
 ## Code Walkthrough (File + Function Map)
 
-Use this map to connect ETL theory to implementation:
+### Simple ETL
 
-1. CLI orchestration (`etl/airviro/cli.py`)
-   - `build_parser`: defines `bootstrap-db`, `run`, `backfill`, and `warehouse-status`.
-   - `run_pipeline`: end-to-end flow for selected source(s) and date range.
-   - `build_progress_logger`: verbose extraction progress events.
-   - `main`: command dispatch and top-level error handling.
+`etl/lecture4_simple_air_quality.py`
+- `discover_station_metadata`: discover station `8` from the station API
+- `discover_indicator_metadata`: discover indicator IDs and names from the indicator API
+- `extract`: fetch one monitoring window from the API
+- `transform`: normalize rows and pivot them into a wide hourly table
+- `load`: create/load `l4_simple.air_quality_station_8_hourly`
+- `main`: tie the ETL stages together
 
-2. Runtime configuration (`etl/airviro/config.py`)
-   - `Settings.from_env`: reads `.env` values into one typed config object.
-   - `candidate_db_hosts`: supports both devcontainer and compose network host resolution.
+### Advanced CLI Orchestration
 
-3. Extraction + transformation (`etl/airviro/pipeline.py`)
-   - `get_source_configs`: expands configured station IDs into source definitions.
-   - `date_chunks`: splits date ranges into fixed-size windows.
-   - `fetch_source_window`: calls Airviro API with retry/backoff behavior.
-   - `extract_window_with_split`: recursively splits failing windows.
-   - `parse_airviro_csv`: parses CSV rows and builds normalized measurements.
-   - `parse_localized_numeric`: handles localized numeric formats and null-like values.
-   - `normalize_indicator_code`: creates stable indicator keys from source headers.
-   - `build_source_records`: complete per-source extract+transform stage.
+`etl/airviro/cli.py`
+- `build_parser`: defines `bootstrap-db`, `run`, `backfill`, and `warehouse-status`
+- `run_pipeline`: end-to-end flow for selected source(s) and date range
+- `build_progress_logger`: verbose extraction progress events
+- `main`: command dispatch and top-level error handling
 
-4. Load + warehouse operations (`etl/airviro/db.py`)
-   - `connect_warehouse`: opens Postgres connection with fallback host candidates.
-   - `apply_schema`: applies `sql/warehouse/airviro_schema.sql`.
-   - `upsert_measurements`: idempotent upsert into `raw.airviro_measurement`.
-   - `log_ingestion_audit`: records success/failure metadata per source batch.
-   - `refresh_dimensions`: refreshes serving-layer dimensions/views after load.
-   - `collect_warehouse_status`: used by `warehouse-status` reporting.
+### Runtime Configuration
 
-## Why This Structure Works Well For Learning
+`etl/airviro/config.py`
+- `Settings.from_env`: reads `.env` values into one typed config object
+- `candidate_db_hosts`: supports both devcontainer and compose network host resolution
 
-1. Separation of concerns:
-   - `pipeline.py` focuses on source parsing and data quality.
-   - `db.py` focuses on persistence and SQL-side concerns.
-   - `cli.py` focuses on user-facing command flow.
-2. Idempotency:
-   - rerunning the same window updates existing rows instead of duplicating them.
-3. Observability:
-   - verbose mode + ingestion audit table provide a clear trace of what happened.
-4. Operational safety:
-   - bounded windows and split-on-failure reduce risk from unstable source behavior.
+### Extraction + Transformation
 
-See the operational runbook for commands and schema details:
-- [operations.md](./operations.md)
+`etl/airviro/pipeline.py`
+- `fetch_station_catalog`: discovers station metadata from the API
+- `fetch_indicator_catalog`: discovers indicator metadata from the API
+- `get_source_configs`: expands configured lecture sources into runnable ETL sources
+- `date_chunks`: splits date ranges into fixed-size windows
+- `fetch_source_window`: fetches monitoring JSON for one source window
+- `parse_monitoring_json`: normalizes API rows into warehouse measurement rows
+- `build_window_coverage_warning`: checks returned timestamps against the requested window
 
-## Better Practices: "Ideal" Flow Beyond The Classroom
+### Loading + Dimensions
 
-Our local Compose setup is intentionally simple for teaching. A more ideal real-world flow would add:
-
-1. Clear layered modeling (`staging` -> `intermediate` -> `marts`) and strict naming conventions.
-2. Automated data tests and source freshness checks in every build.
-3. Incremental processing with explicit keys/watermarks and safe reruns.
-4. CI/CD checks that run transformations/tests before deployment.
-5. Orchestrated scheduling, retries, and alerting (introduced in Lecture 5).
-
-Verified references (as of March 12, 2026):
-
-- dbt project structure best practices:
-  <https://docs.getdbt.com/best-practices/how-we-structure/1-guide-overview>
-- dbt incremental models:
-  <https://docs.getdbt.com/docs/build/incremental-models>
-- dbt source freshness:
-  <https://docs.getdbt.com/reference/resource-properties/freshness>
-- dbt build command (run + test in one command):
-  <https://docs.getdbt.com/reference/commands/build>
+`etl/airviro/db.py`
+- `apply_schema`: creates the Lecture 4 raw/mart warehouse objects
+- `upsert_measurements`: upserts into `l4_raw.airviro_measurement`
+- `refresh_dimensions`: refreshes `dim_indicator` and `dim_datetime_hour`
+- `collect_warehouse_status`: reports warehouse health and completeness

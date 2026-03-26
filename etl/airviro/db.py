@@ -19,6 +19,16 @@ from .config import Settings
 from .pipeline import MeasurementRow
 
 
+def _replace_schema_tokens(sql_text: str, settings: Settings) -> str:
+    """Replace schema placeholders in SQL bootstrap files."""
+
+    return (
+        sql_text.replace("__RAW_SCHEMA__", settings.airviro_raw_schema).replace(
+            "__MART_SCHEMA__", settings.airviro_mart_schema
+        )
+    )
+
+
 def connect_warehouse(settings: Settings) -> tuple[PgConnection, str]:
     """Connect to warehouse DB using candidate hosts.
 
@@ -47,10 +57,10 @@ def connect_warehouse(settings: Settings) -> tuple[PgConnection, str]:
     )
 
 
-def apply_schema(connection: PgConnection, sql_path: Path) -> None:
+def apply_schema(connection: PgConnection, sql_path: Path, settings: Settings) -> None:
     """Apply schema bootstrap SQL."""
 
-    sql_text = sql_path.read_text(encoding="utf-8")
+    sql_text = _replace_schema_tokens(sql_path.read_text(encoding="utf-8"), settings)
     with connection.cursor() as cursor:
         cursor.execute(sql_text)
     connection.commit()
@@ -58,6 +68,7 @@ def apply_schema(connection: PgConnection, sql_path: Path) -> None:
 
 def collect_warehouse_status(
     connection: PgConnection,
+    settings: Settings,
     *,
     indicator_limit: int = 500,
     audit_limit: int = 10,
@@ -76,6 +87,9 @@ def collect_warehouse_status(
         raise ValueError("audit_limit must be >= 1")
 
     status: dict[str, Any] = {}
+    measurement_table = f"{settings.airviro_raw_schema}.airviro_measurement"
+    ingestion_audit_table = f"{settings.airviro_raw_schema}.airviro_ingestion_audit"
+    watermark_table = f"{settings.airviro_raw_schema}.pipeline_watermark"
     with connection.cursor(cursor_factory=extras.RealDictCursor) as cursor:
         cursor.execute(
             """
@@ -90,23 +104,27 @@ def collect_warehouse_status(
         cursor.execute(
             """
             SELECT
-              to_regclass('raw.airviro_measurement') IS NOT NULL AS has_measurement_table,
-              to_regclass('raw.airviro_ingestion_audit') IS NOT NULL AS has_ingestion_audit_table,
-              to_regclass('raw.pipeline_watermark') IS NOT NULL AS has_pipeline_watermark_table
+              to_regclass(%s) IS NOT NULL AS has_measurement_table,
+              to_regclass(%s) IS NOT NULL AS has_ingestion_audit_table,
+              to_regclass(%s) IS NOT NULL AS has_pipeline_watermark_table
             """
+            ,
+            (measurement_table, ingestion_audit_table, watermark_table),
         )
         table_status = dict(cursor.fetchone())
         status["table_status"] = table_status
+        status["raw_schema"] = settings.airviro_raw_schema
+        status["mart_schema"] = settings.airviro_mart_schema
 
         if not table_status["has_measurement_table"]:
             status["warning"] = (
-                "raw.airviro_measurement does not exist yet. "
+                f"{measurement_table} does not exist yet. "
                 "Run bootstrap first: make etl-bootstrap"
             )
             return status
 
         cursor.execute(
-            """
+            f"""
             SELECT
               COUNT(*)::bigint AS measurement_rows,
               COUNT(DISTINCT source_type)::int AS source_type_count,
@@ -115,13 +133,13 @@ def collect_warehouse_status(
               MIN(observed_at) AS first_observed_at,
               MAX(observed_at) AS last_observed_at,
               COUNT(*) FILTER (WHERE value_numeric IS NULL)::bigint AS null_value_rows
-            FROM raw.airviro_measurement
+            FROM {measurement_table}
             """
         )
         status["measurement_totals"] = dict(cursor.fetchone())
 
         cursor.execute(
-            """
+            f"""
             SELECT
               source_type,
               station_id,
@@ -130,7 +148,7 @@ def collect_warehouse_status(
               COUNT(*) FILTER (WHERE value_numeric IS NULL)::bigint AS null_value_rows,
               MIN(observed_at) AS first_observed_at,
               MAX(observed_at) AS last_observed_at
-            FROM raw.airviro_measurement
+            FROM {measurement_table}
             GROUP BY source_type, station_id
             ORDER BY source_type, station_id
             """
@@ -138,7 +156,7 @@ def collect_warehouse_status(
         status["coverage_by_source"] = [dict(row) for row in cursor.fetchall()]
 
         cursor.execute(
-            """
+            f"""
             WITH indicator_span AS (
               SELECT
                 source_type,
@@ -148,7 +166,7 @@ def collect_warehouse_status(
                 MAX(observed_at) AS last_observed_at,
                 COUNT(*)::bigint AS row_count,
                 COUNT(*) FILTER (WHERE value_numeric IS NULL)::bigint AS null_value_rows
-              FROM raw.airviro_measurement
+              FROM {measurement_table}
               GROUP BY source_type, station_id, indicator_code
             ),
             indicator_completeness AS (
@@ -197,12 +215,12 @@ def collect_warehouse_status(
 
         if table_status["has_pipeline_watermark_table"]:
             cursor.execute(
-                """
+                f"""
                 SELECT
                   pipeline_name,
                   watermark_date,
                   updated_at
-                FROM raw.pipeline_watermark
+                FROM {watermark_table}
                 ORDER BY pipeline_name
                 """
             )
@@ -212,7 +230,7 @@ def collect_warehouse_status(
 
         if table_status["has_ingestion_audit_table"]:
             cursor.execute(
-                """
+                f"""
                 SELECT
                   created_at,
                   batch_id,
@@ -226,7 +244,7 @@ def collect_warehouse_status(
                   duplicate_records,
                   split_events,
                   status
-                FROM raw.airviro_ingestion_audit
+                FROM {ingestion_audit_table}
                 ORDER BY created_at DESC
                 LIMIT %s
                 """,
@@ -239,7 +257,11 @@ def collect_warehouse_status(
     return status
 
 
-def upsert_measurements(connection: PgConnection, rows: Iterable[MeasurementRow]) -> int:
+def upsert_measurements(
+    connection: PgConnection,
+    rows: Iterable[MeasurementRow],
+    settings: Settings,
+) -> int:
     """Insert or update normalized measurements."""
 
     payload = [
@@ -257,8 +279,8 @@ def upsert_measurements(connection: PgConnection, rows: Iterable[MeasurementRow]
     if not payload:
         return 0
 
-    query = """
-    INSERT INTO raw.airviro_measurement (
+    query = f"""
+    INSERT INTO {settings.airviro_raw_schema}.airviro_measurement (
       source_type,
       station_id,
       observed_at,
@@ -282,37 +304,39 @@ def upsert_measurements(connection: PgConnection, rows: Iterable[MeasurementRow]
     return len(payload)
 
 
-def refresh_dimensions(connection: PgConnection) -> None:
+def refresh_dimensions(connection: PgConnection, settings: Settings) -> None:
     """Refresh dimension tables from loaded raw facts."""
 
-    refresh_sql = """
-    INSERT INTO mart.dim_indicator (source_type, indicator_code, indicator_name)
+    refresh_sql = f"""
+    INSERT INTO {settings.airviro_mart_schema}.dim_indicator (source_type, indicator_code, indicator_name)
     SELECT DISTINCT source_type, indicator_code, indicator_name
-    FROM raw.airviro_measurement
+    FROM {settings.airviro_raw_schema}.airviro_measurement
     ON CONFLICT DO NOTHING;
 
-    UPDATE mart.dim_indicator AS target
+    UPDATE {settings.airviro_mart_schema}.dim_indicator AS target
     SET indicator_name = source.indicator_name
     FROM (
       SELECT DISTINCT source_type, indicator_code, indicator_name
-      FROM raw.airviro_measurement
+      FROM {settings.airviro_raw_schema}.airviro_measurement
     ) AS source
     WHERE target.source_type = source.source_type
       AND target.indicator_code = source.indicator_code
       AND target.indicator_name IS DISTINCT FROM source.indicator_name;
 
-    INSERT INTO mart.dim_datetime_hour (
+    INSERT INTO {settings.airviro_mart_schema}.dim_datetime_hour (
       observed_at,
       date_value,
       year_number,
       quarter_number,
       month_number,
       month_name,
+      month_short,
       day_number,
       hour_number,
       iso_week_number,
       day_of_week_number,
-      day_name
+      day_name,
+      day_short
     )
     SELECT
       source.observed_at,
@@ -320,21 +344,113 @@ def refresh_dimensions(connection: PgConnection) -> None:
       EXTRACT(YEAR FROM source.observed_at)::int,
       EXTRACT(QUARTER FROM source.observed_at)::int,
       EXTRACT(MONTH FROM source.observed_at)::int,
-      TO_CHAR(source.observed_at, 'Month'),
+      TRIM(TO_CHAR(source.observed_at, 'Month')),
+      CASE EXTRACT(MONTH FROM source.observed_at)::int
+        WHEN 1 THEN '           Jan'
+        WHEN 2 THEN '          Feb'
+        WHEN 3 THEN '         Mar'
+        WHEN 4 THEN '        Apr'
+        WHEN 5 THEN '       May'
+        WHEN 6 THEN '      Jun'
+        WHEN 7 THEN '     Jul'
+        WHEN 8 THEN '    Aug'
+        WHEN 9 THEN '   Sep'
+        WHEN 10 THEN '  Oct'
+        WHEN 11 THEN ' Nov'
+        ELSE 'Dec'
+      END,
       EXTRACT(DAY FROM source.observed_at)::int,
       EXTRACT(HOUR FROM source.observed_at)::int,
       EXTRACT(WEEK FROM source.observed_at)::int,
       EXTRACT(ISODOW FROM source.observed_at)::int,
-      TO_CHAR(source.observed_at, 'Dy')
+      TRIM(TO_CHAR(source.observed_at, 'Dy')),
+      CASE EXTRACT(ISODOW FROM source.observed_at)::int
+        WHEN 1 THEN '      Mon'
+        WHEN 2 THEN '     Tue'
+        WHEN 3 THEN '    Wed'
+        WHEN 4 THEN '   Thu'
+        WHEN 5 THEN '  Fri'
+        WHEN 6 THEN ' Sat'
+        ELSE 'Sun'
+      END
     FROM (
       SELECT DISTINCT observed_at
-      FROM raw.airviro_measurement
+      FROM {settings.airviro_raw_schema}.airviro_measurement
     ) AS source
     WHERE NOT EXISTS (
       SELECT 1
-      FROM mart.dim_datetime_hour AS target
+      FROM {settings.airviro_mart_schema}.dim_datetime_hour AS target
       WHERE target.observed_at = source.observed_at
     );
+
+    WITH source_datetime AS (
+      SELECT DISTINCT
+        observed_at,
+        observed_at::date AS date_value,
+        EXTRACT(YEAR FROM observed_at)::int AS year_number,
+        EXTRACT(QUARTER FROM observed_at)::int AS quarter_number,
+        EXTRACT(MONTH FROM observed_at)::int AS month_number,
+        TRIM(TO_CHAR(observed_at, 'Month')) AS month_name,
+        CASE EXTRACT(MONTH FROM observed_at)::int
+          WHEN 1 THEN '           Jan'
+          WHEN 2 THEN '          Feb'
+          WHEN 3 THEN '         Mar'
+          WHEN 4 THEN '        Apr'
+          WHEN 5 THEN '       May'
+          WHEN 6 THEN '      Jun'
+          WHEN 7 THEN '     Jul'
+          WHEN 8 THEN '    Aug'
+          WHEN 9 THEN '   Sep'
+          WHEN 10 THEN '  Oct'
+          WHEN 11 THEN ' Nov'
+          ELSE 'Dec'
+        END AS month_short,
+        EXTRACT(DAY FROM observed_at)::int AS day_number,
+        EXTRACT(HOUR FROM observed_at)::int AS hour_number,
+        EXTRACT(WEEK FROM observed_at)::int AS iso_week_number,
+        EXTRACT(ISODOW FROM observed_at)::int AS day_of_week_number,
+        TRIM(TO_CHAR(observed_at, 'Dy')) AS day_name,
+        CASE EXTRACT(ISODOW FROM observed_at)::int
+          WHEN 1 THEN '      Mon'
+          WHEN 2 THEN '     Tue'
+          WHEN 3 THEN '    Wed'
+          WHEN 4 THEN '   Thu'
+          WHEN 5 THEN '  Fri'
+          WHEN 6 THEN ' Sat'
+          ELSE 'Sun'
+        END AS day_short
+      FROM {settings.airviro_raw_schema}.airviro_measurement
+    )
+    UPDATE {settings.airviro_mart_schema}.dim_datetime_hour AS target
+    SET
+      date_value = source.date_value,
+      year_number = source.year_number,
+      quarter_number = source.quarter_number,
+      month_number = source.month_number,
+      month_name = source.month_name,
+      month_short = source.month_short,
+      day_number = source.day_number,
+      hour_number = source.hour_number,
+      iso_week_number = source.iso_week_number,
+      day_of_week_number = source.day_of_week_number,
+      day_name = source.day_name,
+      day_short = source.day_short
+    FROM source_datetime AS source
+    WHERE target.observed_at = source.observed_at
+      AND (
+        target.date_value IS DISTINCT FROM source.date_value
+        OR target.year_number IS DISTINCT FROM source.year_number
+        OR target.quarter_number IS DISTINCT FROM source.quarter_number
+        OR target.month_number IS DISTINCT FROM source.month_number
+        OR target.month_name IS DISTINCT FROM source.month_name
+        OR target.month_short IS DISTINCT FROM source.month_short
+        OR target.day_number IS DISTINCT FROM source.day_number
+        OR target.hour_number IS DISTINCT FROM source.hour_number
+        OR target.iso_week_number IS DISTINCT FROM source.iso_week_number
+        OR target.day_of_week_number IS DISTINCT FROM source.day_of_week_number
+        OR target.day_name IS DISTINCT FROM source.day_name
+        OR target.day_short IS DISTINCT FROM source.day_short
+      );
     """
 
     with connection.cursor() as cursor:
@@ -344,6 +460,7 @@ def refresh_dimensions(connection: PgConnection) -> None:
 
 def log_ingestion_audit(
     connection: PgConnection,
+    settings: Settings,
     *,
     batch_id: str,
     source_key: str,
@@ -362,8 +479,8 @@ def log_ingestion_audit(
 
     with connection.cursor() as cursor:
         cursor.execute(
-            """
-            INSERT INTO raw.airviro_ingestion_audit (
+            f"""
+            INSERT INTO {settings.airviro_raw_schema}.airviro_ingestion_audit (
               batch_id,
               source_key,
               source_type,

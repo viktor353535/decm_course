@@ -50,19 +50,31 @@ make devcontainer-join-course-network
 Note: keep Airflow stopped during Lecture 4 to avoid background orchestration side effects.
 Airflow is started in Lecture 5.
 
-Core ETL flow:
+Simple ETL tutorial example:
+
+```bash
+.venv/bin/python etl/lecture4_simple_air_quality.py --from 2026-03-10 --to 2026-03-12 --load-mode replace
+```
+
+Advanced Lecture 4 ETL flow:
 
 ```bash
 make etl-bootstrap
-make etl-backfill-2020-2025
+.venv/bin/python -m etl.airviro.cli run --from 2026-03-10 --to 2026-03-12 --source-key air_quality_station_8 --source-key pollen_station_25 --verbose
 make warehouse-status
 ```
 
-Optional verbose run:
+Optional larger historical load:
 
 ```bash
 make etl-backfill-2020-2025 VERBOSE=1
 ```
+
+Lecture 4 warehouse relations:
+- `l4_simple.air_quality_station_8_hourly`
+- `l4_mart.v_air_quality_hourly_station_8`
+- `l4_mart.v_pollen_daily_station_25`
+- `l4_mart.v_airviro_measurements_long`
 
 Superset SQL helper snippets:
 - `superset/snippets.md`
@@ -83,6 +95,9 @@ make dbt-build
 make airflow-unpause-dags
 make airflow-trigger-incremental
 ```
+
+Note: the Lecture 5 warehouse/dbt refactor is planned separately.
+Lecture 4 now uses the lecture-specific `l4_*` schemas.
 
 Open Airflow:
 - URL: <http://localhost:8080>
@@ -116,13 +131,17 @@ make reset-volumes
 make reset-all
 ```
 
+These lifecycle targets detach the devcontainer from the course Compose network before teardown so Docker can remove the project network cleanly.
+
 ## Environment Notes
 
 - Work from inside the devcontainer.
 - Host requirements: VS Code, Docker, Git.
 - `.env` is local-only and ignored by git.
 - `.env.example` is the template used by `make init`.
-- Docker runs through the mounted host socket, so bind mount paths must be valid on the host.
+- Prefer the `make up-*` targets over raw `docker compose up` inside the devcontainer.
+- Docker runs through the mounted host socket, so the Makefile resolves bind mount paths against the host daemon.
+- Run `make print-host-workspace` to inspect the requested and resolved workspace paths when debugging bind mounts.
 
 ## Lecture Index
 
