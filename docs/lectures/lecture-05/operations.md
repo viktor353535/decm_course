@@ -134,7 +134,7 @@ dbt layers:
   - `l5_mart.v_ohuseire_measurements_long`
   - `l5_mart.v_air_quality_hourly`
   - `l5_mart.v_pollen_daily`
-  - compatibility alias:
+  - also available as:
     `l5_mart.v_airviro_measurements_long`
 
 ## Modeling Notes
@@ -171,8 +171,7 @@ If the raw layer is missing:
 make etl-bootstrap-l5
 ```
 
-If your local Lecture 5 schema comes from an older repo version that still used
-`l5_raw.airviro_measurement`, rebuild only the Lecture 5 schemas:
+If your local database still contains `l5_raw.airviro_measurement`, rebuild only the Lecture 5 schemas:
 
 ```bash
 make reset-l5
@@ -203,15 +202,15 @@ make reset-l5
 - Incremental catch-up is bounded per run by `AIRFLOW_OHUSEIRE_INCREMENTAL_MAX_DAYS`.
 - If the stack is down for a period, later scheduled runs continue from watermark.
 - Once watermark reaches yesterday, incremental keeps refreshing today's date each hour.
-- `catchup=False` is intentional; watermark state handles backlog instead of scheduler-created historical runs.
+- The DAG uses `catchup=False`; watermark state handles backlog instead of scheduler-created historical runs.
 - Watermarks are tracked per source, for example `ohuseire_incremental:air_quality_station_4`.
 
 ## Platform Notes
 
 These details matter mostly when debugging the local environment:
 
-- Airflow and dbt share one local teaching image, but dbt lives in its own `/opt/dbt-venv`.
-- The local Superset image is also custom-built and intentionally small.
+- Airflow and dbt share one local image, and dbt lives in its own `/opt/dbt-venv`.
+- The local Superset image is also custom-built and small.
 - The shared database defaults to `pgduckdb`, which keeps normal PostgreSQL behavior and also allows optional DuckDB file queries.
 - `warehouse/files/` is bind-mounted into the database and Airflow containers for those file-based experiments.
 

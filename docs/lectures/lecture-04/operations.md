@@ -1,6 +1,6 @@
 # Airviro ETL Notes (Lecture 4 Starter)
 
-For the student-facing lecture flow and learning outcomes, start with:
+For the lecture flow and learning outcomes, start with:
 - [Lecture 4 Overview](./README.md)
 
 ## Overview
@@ -20,8 +20,8 @@ Lecture 4 now has two ETL layers in the same warehouse database:
      - Tartu pollen station `25`
    - goal: show how a more robust ETL design supports validation, reruns, and Superset-ready views
 
-This lecture intentionally avoids air-quality station `19`.
-That station can be introduced later together with stronger dimensional modeling in Lecture 5.
+Lecture 4 uses air-quality station `8` and pollen station `25`.
+Leave air-quality station `19` out of this lecture.
 
 ## Source API
 
@@ -85,8 +85,8 @@ Dry-run validation without DB writes:
 ```
 
 Bootstrap note:
-- Lecture 4 bootstrap intentionally avoids schema-migration logic.
-- If the Lecture 4 raw/mart structure changes during lecture preparation, reset `l4_raw` and `l4_mart`, then rerun `make etl-bootstrap`.
+- Lecture 4 bootstrap recreates the expected schemas and tables, but it does not run migrations.
+- If the local `l4_raw` or `l4_mart` schemas look out of sync, reset them and rerun `make etl-bootstrap`.
 
 ## Lecture 4 Schemas and Relations
 

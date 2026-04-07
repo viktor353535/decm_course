@@ -2,13 +2,13 @@
 
 ## Audience and Goal
 
-This lecture is for students who completed Lecture 3 and can already run the repository in a devcontainer.
+This lecture assumes we completed Lecture 3 and can already run the repository in a devcontainer.
 
 Goal: understand ETL by first reading one small Python script end to end, then compare it with the more advanced CLI-based ETL used elsewhere in the repository.
 
 ## Learning Outcomes
 
-After this lecture, students should be able to:
+After this lecture, we should be able to:
 
 1. Explain `extract`, `transform`, and `load` in a concrete Python example.
 2. Run a simple ETL for Tartu air-quality data with a manual date window.
@@ -27,7 +27,7 @@ make up-superset
 make devcontainer-join-course-network
 ```
 
-Lecture 4 intentionally keeps Airflow out of scope.
+In Lecture 4, leave Airflow out of scope.
 Do not run `make up-all` here; Airflow orchestration is introduced in Lecture 5.
 
 Superset:
@@ -52,7 +52,7 @@ Practical guidance for Lecture 4:
 - the advanced CLI ETL now skips `2025-10-26` automatically for `air_quality_station_8`;
 - avoid using the simple ETL or a manual one-day advanced request for `2025-10-26` until the source behavior is clarified.
 
-The API maintainer has been notified about the timestamp issue and related source quirks. Because the fix would happen on the source side, the API behavior may change without prior warning. If historical responses start looking different, re-run a small validation window before trusting larger backfills.
+Because this behavior comes from the public source API, re-run a small validation window before trusting larger backfills if the responses start looking different.
 
 ## Part 1: Simple ETL Tutorial
 
@@ -65,7 +65,7 @@ This keeps the first example small enough to read in one sitting.
 
 ### Why Start This Way
 
-The simple ETL is intentionally limited:
+The simple ETL stays limited:
 - one script instead of multiple modules;
 - one source instead of multiple stations;
 - one output table instead of raw + marts + audit tables;
@@ -104,7 +104,7 @@ Read it from top to bottom and connect each function to the ETL stages:
      - `type=INDICATOR`
      - the indicator IDs that become `so2`, `pm10`, `wd10`, and the other target columns
      - the fixed API indicator order used when older historical timestamps need repair
-   - that is deliberate: the goal of the first script is to teach ETL flow, not metadata discovery
+   - the goal of the first script is to teach ETL flow, not metadata discovery
 
 2. Extract
    - calls `/api/monitoring/en`
@@ -127,7 +127,7 @@ Read it from top to bottom and connect each function to the ETL stages:
 
 `l4_simple.air_quality_station_8_hourly` is easy to explain because:
 - one row means one hourly observation for one station;
-- students can inspect the columns directly;
+- we can inspect the columns directly;
 - the table shape is convenient for first Superset charts.
 
 That simplicity is helpful for the first ETL walkthrough, but it does not scale as well once we add more sources and more operational requirements.
@@ -164,7 +164,7 @@ Lecture 4 scope for the advanced ETL:
 - Tartu air-quality station `8`
 - Tartu pollen station `25`
 
-Lecture 4 advanced warehouse objects are kept separate from later work:
+Lecture 4 advanced warehouse objects live in separate schemas:
 - raw layer: `l4_raw.*`
 - serving layer: `l4_mart.*`
 
@@ -291,7 +291,7 @@ Lecture 4 advanced dimensions come from three places:
 
 ### Why There Is No Station Dimension Yet
 
-For Lecture 4 we keep the advanced scope narrow:
+For Lecture 4, the advanced scope stays narrow:
 - air quality is limited to station `8`
 - pollen is limited to station `25`
 
@@ -318,9 +318,9 @@ Recommended Lecture 4 datasets:
    - `l4_mart.v_pollen_daily_station_25`
    - `l4_mart.v_airviro_measurements_long`
 
-Suggested teaching pattern:
+Recommended walkthrough:
 - use the simple table first to show the direct result of one ETL script;
-- then switch to the advanced `l4_mart.*` views to show what a better serving layer looks like.
+- then switch to the advanced `l4_mart.*` views to show what a richer serving layer looks like.
 
 ## Code Walkthrough (File + Function Map)
 

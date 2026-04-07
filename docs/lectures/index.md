@@ -1,6 +1,6 @@
 # Lecture Materials
 
-This folder contains student-facing lecture/tutorial materials for the course.
+This folder contains the lecture and tutorial materials for the course.
 
 ## Lecture Sequence
 

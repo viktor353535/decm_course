@@ -26,7 +26,7 @@ Fix:
 2. Reload VS Code window.
 3. Retry reopen command.
 
-## 3) Windows students get path or mount issues
+## 3) Windows path or mount issues
 
 Symptom:
 
@@ -134,14 +134,14 @@ Notes:
 
 Symptom:
 
-- you temporarily edited `docker-compose.yml` or other repo files during class just to get the stack running;
+- you temporarily edited `docker-compose.yml` or other repo files just to get the stack running;
 - `make up-superset` partly works but later fails at `superset-init`;
-- `make down` or `docker compose down` now behaves strangely because the old workaround and the current repo no longer match;
+- `make down` or `docker compose down` now behaves strangely because that workaround no longer matches the checked-in setup;
 - you want to get back to the course setup exactly as the repository expects.
 
 What usually went wrong:
 
-- the temporary classroom workaround changed bind mount behavior;
+- the temporary local workaround changed bind mount behavior;
 - `HOST_WORKSPACE` affects bind mounts in Compose;
 - Superset metadata itself is stored in the named Postgres volume, not in those bind mounts.
 
@@ -163,7 +163,7 @@ Do not keep temporary workaround edits to files like:
 - `.devcontainer/devcontainer.json`
 - `.devcontainer/post-create.sh`
 
-unless you intentionally want to maintain those changes yourself.
+unless you want to maintain those changes yourself.
 
 ### Step B: Sync Your Fork On GitHub
 

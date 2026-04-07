@@ -70,7 +70,7 @@ Optional larger historical load:
 make etl-backfill-2020-2025 VERBOSE=1
 ```
 
-Note: as of 2026-03-27, the live Ohuseire historical API around late October 2025 has mixed timestamp behavior. The advanced Lecture 4 CLI ETL now skips `2025-10-26` automatically for `air_quality_station_8` and warns when a requested range crosses that day. The API maintainer has been notified, and the source behavior may change without prior warning. See `docs/lectures/lecture-04/README.md` for the current caution note.
+Note: as of 2026-03-27, the live Ohuseire historical API around late October 2025 has mixed timestamp behavior. The advanced Lecture 4 CLI ETL now skips `2025-10-26` automatically for `air_quality_station_8` and warns when a requested range crosses that day. Recheck the caution note in `docs/lectures/lecture-04/README.md` before loading larger historical windows.
 
 Lecture 4 warehouse relations:
 - `l4_simple.air_quality_station_8_hourly`
@@ -102,7 +102,7 @@ make airflow-unpause-dags
 make airflow-trigger-incremental
 ```
 
-Lecture 5 uses separate schemas so students can compare the raw ETL design from Lecture 4 with the dimensional warehouse design from Lecture 5:
+Lecture 5 uses separate schemas so we can compare the raw ETL design from Lecture 4 with the dimensional warehouse design from Lecture 5:
 - `l5_raw.ohuseire_measurement`
 - `l5_raw.pipeline_watermark`
 - `l5_mart.dim_station`
@@ -114,7 +114,7 @@ Lecture 5 uses separate schemas so students can compare the raw ETL design from 
 - `l5_mart.v_pollen_daily`
 - `l5_mart.v_ohuseire_measurements_long`
 
-Current teaching-stack note:
+Current stack note:
 - Airflow and Superset are both built locally from slim Debian images with pinned `uv` lock files.
 - Airflow and dbt share one custom image for low-friction local use.
 - dbt is installed into its own `/opt/dbt-venv` inside that image so its Python dependencies stay isolated from Airflow.
@@ -124,6 +124,9 @@ Open Airflow:
 - URL: <http://localhost:8080>
 - username: `airflow`
 - password: `airflow`
+
+Open dbt docs after `make dbt-docs-serve`:
+- URL: <http://localhost:8081>
 
 ## Stack Lifecycle (Quick Reference)
 

@@ -9,3 +9,4 @@ dbt/dbt_packages/
 dbt/.user.yml
 .instructor-private/
 experiments/*/.tools/
+homeworks/

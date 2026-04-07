@@ -86,7 +86,7 @@ These checks were verified against the live public API on March 28, 2026.
 - `https://www.ohuseire.ee/api`
 - `https://www.ohuseire.ee/api/`
 
-Both returned `404` during testing, and I did not find a public OpenAPI, Swagger, or separate API manual page. In practice, the metadata endpoints are the live documentation.
+Both returned `404` in live checks, and no public OpenAPI, Swagger, or separate API manual page was found. In practice, the metadata endpoints are the live documentation.
 
 ### Station 19 Is Not In The Published Station Catalog
 

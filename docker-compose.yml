@@ -265,6 +265,35 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  dbt-docs:
+    <<: *airflow-common
+    profiles:
+      - dbt-docs
+    depends_on: []
+    command:
+      - bash
+      - -lc
+      - |
+        if [ ! -f /opt/airflow/dbt/target/index.html ]; then
+          echo "dbt docs artifacts are missing. Run 'make dbt-docs' first." >&2
+          exit 1
+        fi
+        cd /opt/airflow/dbt
+        exec dbt docs serve --project-dir . --profiles-dir . --port 8081 --host 0.0.0.0 --no-browser
+    ports:
+      - ${DBT_DOCS_PORT:-8081}:8081
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - http://localhost:8081/index.html
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   superset-home:
   postgres-data:

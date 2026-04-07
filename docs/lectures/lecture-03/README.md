@@ -2,12 +2,12 @@
 
 ## Audience and Goal
 
-This lecture is designed for masters-level students without an IT background.
-By the end of the session, each student should be able to run this project in a devcontainer and make one git commit on their own branch.
+This lecture assumes no IT background.
+By the end of the session, we should be able to run this project in a devcontainer and make one git commit on our own branch.
 
 ## Learning Outcomes
 
-After this lecture, students should be able to:
+After this lecture, we should be able to:
 
 1. Navigate core VS Code views and use the integrated terminal.
 2. Explain Docker basics (image, container, volume, network) and run basic commands.
@@ -16,7 +16,7 @@ After this lecture, students should be able to:
 
 ## Preflight Checklist
 
-Run this before class starts:
+Check these before we begin:
 
 1. VS Code installed.
 2. Docker Desktop installed and running.
@@ -32,7 +32,7 @@ References:
 
 ## Practical Flow (Core Path)
 
-Use this exact sequence in class:
+Use this sequence:
 
 1. Clone repository and open in VS Code.
 2. Install required extensions (Dev Containers and Docker).

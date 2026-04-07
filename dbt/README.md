@@ -2,7 +2,7 @@
 
 This project contains the SQL-first transformation layer for the Lecture 5 warehouse.
 
-Lecture 4 and Lecture 5 intentionally use different warehouse schemas:
+Lecture 4 and Lecture 5 use different warehouse schemas:
 
 - Lecture 4 focuses on ETL foundations in `l4_*`
 - Lecture 5 focuses on orchestration and dimensional modeling in `l5_raw` and `l5_mart`
@@ -28,6 +28,8 @@ Use the Make targets from the repository root:
 ```bash
 make dbt-debug
 make dbt-build
+make dbt-docs
+make dbt-docs-serve
 ```
 
 `make dbt-build` runs:
@@ -37,6 +39,16 @@ make dbt-build
 3. `dbt test`
 
 All commands run inside the `airflow-scheduler` container using the same dependencies as Airflow DAG tasks.
+
+`make dbt-docs` runs `dbt docs generate` and writes documentation artifacts into `dbt/target/`.
+Those generated files are intentionally ignored by git.
+
+`make dbt-docs-serve` regenerates the docs and starts a small optional `dbt-docs` Compose service that runs `dbt docs serve` on `http://127.0.0.1:8081`.
+That service reuses the same Airflow+dbt image, but it stays separate from the Airflow API server so each container keeps one clear job.
+
+Do not open `dbt/target/index.html` directly with `file://`.
+The generated site loads `manifest.json` and `catalog.json` next to the HTML file, and browsers often block that local-file fetch flow.
+Serve the folder over HTTP instead.
 
 ## Profile and Schemas
 
@@ -115,7 +127,7 @@ If we are reading the dbt project for the first time, this order works well:
 - Each top-level ETL window is fetched with a small date overlap and trimmed back to the requested window so historical backfills do not lose boundary rows.
 - Presentation views sit on top of facts instead of replacing them.
 - The hourly fact keeps the original `observed_at` timestamp and also stores an analytic `hour_key` so we can discuss daylight saving time edge cases without losing the source timestamp.
-- The project is intentionally split into small models so we can read and test one step at a time instead of reverse-engineering one large SQL file.
+- The project is split into small models so we can read and test one step at a time instead of reverse-engineering one large SQL file.
 
 ## Validation
 
@@ -132,8 +144,14 @@ Expected outcome:
 - all models build into `l5_mart`
 - data tests pass
 
+Small SQL style note:
+
+- Some dbt tests use shorthand like `group by 1, 2, 3, 4`.
+- In SQL, that means "group by the 1st, 2nd, 3rd, and 4th selected expressions".
+- It is valid PostgreSQL syntax, but it depends on the order of the `select` list, so read it as positional shorthand rather than as literal column names.
+
 ## Recovery
 
 - If raw tables are missing, run `make etl-bootstrap-l5`.
 - If the mart looks stale after ETL work, rerun `make dbt-build`.
-- If the local stack becomes confusing, use `make reset-volumes` and reload the lesson data from the lecture instructions.
+- If the Lecture 5 warehouse state becomes confusing, use `make reset-l5` and reload the lesson flow from the lecture instructions.

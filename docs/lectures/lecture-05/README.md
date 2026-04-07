@@ -9,7 +9,24 @@ This lecture builds on Lecture 4. Instead of running ETL by hand, we now work th
 3. transform that raw data with dbt
 4. orchestrate the full flow with Airflow
 
-Goal: understand how API-driven ETL, dimensional modeling, dbt, and Airflow fit together in one clear teaching stack.
+Goal: understand how API-driven ETL, dimensional modeling, dbt, and Airflow fit together in one clear local stack.
+
+## ETL Or ELT?
+
+In common data-engineering literature, this Lecture 5 pipeline is best described as an **ELT-style** flow:
+
+- Python extracts data from the Ohuseire API.
+- Python loads raw, source-shaped rows into `l5_raw`.
+- dbt transforms that already-loaded raw data into analytical models in `l5_mart`.
+- Airflow orchestrates the whole workflow.
+
+You may notice that dbt also materializes tables and views. In strict step-by-step language, that can feel like a second load step. In most references, though, this is still grouped under **ELT** because the important boundary is that transformation happens after raw data has already been loaded into the warehouse.
+
+Useful references:
+
+- [IBM: ELT vs. ETL](https://www.ibm.com/think/topics/elt-vs-etl)
+- [dbt Labs: Data transformation is the "T" in ETL/ELT](https://www.getdbt.com/blog/data-transformation-best-practices)
+- [Apache Airflow: Use Airflow for ETL/ELT pipelines](https://airflow.apache.org/use-cases/etl_analytics/)
 
 ## Learning Outcomes
 
@@ -50,7 +67,7 @@ That means the lecture is not only "about Airflow". It is about how Airflow coor
 
 ## Architecture At A Glance
 
-Lecture 4 and Lecture 5 intentionally use different schemas:
+Lecture 4 and Lecture 5 use different schemas:
 
 - Lecture 4: `l4_*`
 - Lecture 5: `l5_raw` and `l5_mart`
@@ -190,6 +207,12 @@ If you want to rerun only the dbt modeling layer after raw data is loaded:
 make dbt-build
 ```
 
+If you want to browse the dbt model graph and generated documentation locally:
+
+```bash
+make dbt-docs-serve
+```
+
 Backfill example:
 
 ```bash
@@ -200,6 +223,9 @@ Open Airflow UI:
 - <http://localhost:8080>
 - user: `airflow`
 - pass: `airflow`
+
+Open dbt docs:
+- <http://localhost:8081>
 
 ## What To Observe
 
@@ -225,16 +251,16 @@ Inside Airflow, focus on:
 - when watermarks advance
 - how incremental and backfill differ
 
-## How This Classroom Stack Differs From Production
+## How This Local Stack Differs From Larger Deployments
 
-This repository keeps the stack intentionally small:
+This local stack stays small:
 
 - local Docker Compose instead of a production deployment platform
-- Airflow and dbt inside one teaching-oriented image
+- Airflow and dbt inside one local image
 - LocalExecutor instead of Celery or Kubernetes
 - one shared PostgreSQL-compatible service instead of multiple platform components
 
-That is a teaching compromise, not the only correct architecture. It keeps the lecture focused on data flow and design patterns instead of platform complexity.
+This keeps the lecture focused on data flow and design patterns instead of platform complexity. Other deployments may split these services further.
 
 ## Need More Detail?
 

@@ -40,8 +40,10 @@ RESOLVE_HOST_WORKSPACE = \
 COMPOSE := $(RESOLVE_HOST_WORKSPACE) sudo env HOST_WORKSPACE="$$path" docker compose --env-file $(ENV_FILE)
 PROFILES_SUPERSET := --profile superset
 PROFILES_AIRFLOW := --profile airflow
+PROFILES_DBT_DOCS := --profile dbt-docs
 ETL_VERBOSE_FLAG := $(if $(filter 1 true yes,$(VERBOSE)),--verbose,)
 DBT_PROJECT_DIR := /opt/airflow/dbt
+DBT_DOCS_PORT ?= 8081
 LECTURE4_SOURCE_KEYS := --source-key air_quality_station_8 --source-key pollen_station_25
 DAG_ID ?= ohuseire_incremental
 BACKFILL_START ?= 2020-01-01
@@ -55,7 +57,7 @@ LECTURE5_TABLE_ENV := OHUSEIRE_RAW_SCHEMA=l5_raw OHUSEIRE_MART_SCHEMA=l5_mart OH
 
 .PHONY: help init check-host-workspace print-host-workspace up-superset up-airflow up-all down logs ps reset-volumes reset-all reset-l5 \
 	etl-bootstrap etl-bootstrap-l5 etl-dry-run etl-backfill-2020-2025 etl-backfill-2020-today warehouse-status warehouse-status-json warehouse-status-l5 pgduckdb-bootstrap \
-	devcontainer-join-course-network devcontainer-leave-course-network dbt-debug dbt-seed dbt-run dbt-test dbt-build \
+	devcontainer-join-course-network devcontainer-leave-course-network dbt-debug dbt-seed dbt-run dbt-test dbt-build dbt-docs dbt-docs-serve \
 	airflow-list-dags airflow-list-runs airflow-trigger-incremental airflow-trigger-backfill \
 	airflow-unpause-dags airflow-pause-dags
 
@@ -88,6 +90,8 @@ help:
 	@echo "  make dbt-run        Build dbt models (staging + intermediate + marts)"
 	@echo "  make dbt-test       Run dbt data tests"
 	@echo "  make dbt-build      Run dbt seed + run + test"
+	@echo "  make dbt-docs       Generate dbt documentation artifacts in dbt/target"
+	@echo "  make dbt-docs-serve Generate dbt docs and start the optional dbt-docs service on http://127.0.0.1:$(DBT_DOCS_PORT)"
 	@echo "  make airflow-list-dags      List DAGs in airflow-scheduler"
 	@echo "  make airflow-list-runs DAG_ID=<dag_id>  List recent DAG runs"
 	@echo "  make airflow-unpause-dags   Unpause ohuseire_incremental and ohuseire_backfill"
@@ -137,22 +141,22 @@ up-all: init check-host-workspace
 
 down: check-host-workspace
 	@$(MAKE) --no-print-directory devcontainer-leave-course-network
-	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) down --remove-orphans
+	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) $(PROFILES_DBT_DOCS) down --remove-orphans
 
 ps: check-host-workspace
-	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) ps
+	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) $(PROFILES_DBT_DOCS) ps
 
 logs: check-host-workspace
 	@if [ -z "$(SERVICE)" ]; then echo "Usage: make logs SERVICE=<service-name>"; exit 1; fi
-	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) logs -f --tail=200 $(SERVICE)
+	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) $(PROFILES_DBT_DOCS) logs -f --tail=200 $(SERVICE)
 
 reset-volumes: check-host-workspace
 	@$(MAKE) --no-print-directory devcontainer-leave-course-network
-	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) down -v --remove-orphans
+	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) $(PROFILES_DBT_DOCS) down -v --remove-orphans
 
 reset-all: check-host-workspace
 	@$(MAKE) --no-print-directory devcontainer-leave-course-network
-	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) down -v --rmi local --remove-orphans
+	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) $(PROFILES_DBT_DOCS) down -v --rmi local --remove-orphans
 
 reset-l5: up-airflow
 	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T postgres psql -U postgres -d warehouse -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS l5_mart CASCADE; DROP SCHEMA IF EXISTS l5_raw CASCADE;"
@@ -237,6 +241,13 @@ dbt-test: up-airflow
 
 dbt-build: up-airflow
 	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler bash -lc "cd $(DBT_PROJECT_DIR) && dbt seed --project-dir . --profiles-dir . && dbt run --project-dir . --profiles-dir . && dbt test --project-dir . --profiles-dir ."
+
+dbt-docs: up-airflow
+	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler bash -lc "cd $(DBT_PROJECT_DIR) && dbt docs generate --project-dir . --profiles-dir ."
+
+dbt-docs-serve: dbt-docs check-host-workspace
+	@$(COMPOSE) $(PROFILES_DBT_DOCS) up -d dbt-docs
+	@echo "dbt docs available at http://127.0.0.1:$(DBT_DOCS_PORT)"
 
 airflow-list-dags: up-airflow
 	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags list
