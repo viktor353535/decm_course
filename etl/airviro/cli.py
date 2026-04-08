@@ -1,4 +1,4 @@
-"""CLI entry points for the Airviro ETL pipeline."""
+"""CLI entry points for the Ohuseire ETL pipeline."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import asdict
 from datetime import date, datetime, time
 from pathlib import Path
 import json
+import os
 import sys
 import uuid
 
@@ -31,7 +32,17 @@ from .pipeline import (
 )
 
 
-SCHEMA_SQL_PATH = Path("sql/warehouse/l4_airviro_schema.sql")
+DEFAULT_SCHEMA_SQL_PATH = "sql/warehouse/l4_airviro_schema.sql"
+
+
+def default_schema_sql_path() -> str:
+    """Return the default bootstrap SQL path from env or the legacy Lecture 4 path."""
+
+    return (
+        os.getenv("OHUSEIRE_SCHEMA_SQL_PATH")
+        or os.getenv("AIRVIRO_SCHEMA_SQL_PATH")
+        or DEFAULT_SCHEMA_SQL_PATH
+    ).strip() or DEFAULT_SCHEMA_SQL_PATH
 
 
 def parse_source_keys(raw_values: list[str] | None) -> list[str]:
@@ -72,12 +83,15 @@ def build_progress_logger(verbose: bool) -> ProgressCallback | None:
         source_label = f"{source_key}/{source_type}"
 
         if event_name == "source_start":
+            padding_suffix = ""
+            if int(event.get("request_padding_days", 0)):
+                padding_suffix = f", request_padding_days={event['request_padding_days']}"
             print(
                 (
                     f"[{source_label}] extracting {event['from_date']}..{event['to_date']} "
                     f"(station={event['source_station_id']}, "
                     f"max_window_days={event['max_window_days']}, "
-                    f"top_level_windows={event['top_level_window_count']})"
+                    f"top_level_windows={event['top_level_window_count']}{padding_suffix})"
                 ),
                 file=sys.stderr,
                 flush=True,
@@ -85,10 +99,18 @@ def build_progress_logger(verbose: bool) -> ProgressCallback | None:
             return
 
         if event_name == "top_level_window_start":
+            fetch_suffix = ""
+            if (
+                event.get("fetch_window_start") != event.get("window_start")
+                or event.get("fetch_window_end") != event.get("window_end")
+            ):
+                fetch_suffix = (
+                    f" (fetch {event['fetch_window_start']}..{event['fetch_window_end']})"
+                )
             print(
                 (
                     f"[{source_label}] window {event['window_index']}/{event['window_count']} "
-                    f"{event['window_start']}..{event['window_end']}"
+                    f"{event['window_start']}..{event['window_end']}{fetch_suffix}"
                 ),
                 file=sys.stderr,
                 flush=True,
@@ -101,7 +123,11 @@ def build_progress_logger(verbose: bool) -> ProgressCallback | None:
                     f"[{source_label}] window {event['window_index']}/{event['window_count']} done: "
                     f"rows={event['rows_read_window']} records={event['records_normalized_window']} "
                     f"duplicates={event['duplicates_window']} "
+                    f"trimmed_outside_fetch={event['trimmed_out_of_window_window']} "
+                    f"padding_trimmed={event['trimmed_from_padding_window']} "
                     f"(totals rows={event['rows_read_total']} records={event['records_normalized_total']} "
+                    f"trimmed_outside_fetch={event['trimmed_out_of_window_total']} "
+                    f"padding_trimmed={event['trimmed_from_padding_total']} "
                     f"windows_requested={event['windows_requested_total']} splits={event['split_events_total']})"
                 ),
                 file=sys.stderr,
@@ -167,6 +193,8 @@ def build_progress_logger(verbose: bool) -> ProgressCallback | None:
                 (
                     f"[{source_label}] extraction complete: rows={event['rows_read_total']} "
                     f"records={event['records_normalized_total']} duplicates={event['duplicates_total']} "
+                    f"trimmed_outside_fetch={event['trimmed_out_of_window_total']} "
+                    f"padding_trimmed={event['trimmed_from_padding_total']} "
                     f"windows_requested={event['windows_requested_total']} "
                     f"splits={event['split_events_total']}"
                 ),
@@ -233,6 +261,8 @@ def render_warehouse_status(
     table_status = status.get("table_status", {})
     raw_schema = format_scalar(status.get("raw_schema"))
     mart_schema = format_scalar(status.get("mart_schema"))
+    measurement_table_name = format_scalar(status.get("measurement_table_name"))
+    ingestion_audit_table_name = format_scalar(status.get("ingestion_audit_table_name"))
 
     lines.append("Warehouse Status")
     lines.append(f"host: {format_scalar(status.get('database_host'))}")
@@ -243,8 +273,8 @@ def render_warehouse_status(
     lines.append(f"collected_at_utc: {format_scalar(database.get('collected_at_utc'))}")
     lines.append(
         "tables: "
-        f"{raw_schema}.airviro_measurement={format_scalar(table_status.get('has_measurement_table'))}, "
-        f"{raw_schema}.airviro_ingestion_audit={format_scalar(table_status.get('has_ingestion_audit_table'))}, "
+        f"{raw_schema}.{measurement_table_name}={format_scalar(table_status.get('has_measurement_table'))}, "
+        f"{raw_schema}.{ingestion_audit_table_name}={format_scalar(table_status.get('has_ingestion_audit_table'))}, "
         f"{raw_schema}.pipeline_watermark={format_scalar(table_status.get('has_pipeline_watermark_table'))}"
     )
 
@@ -294,7 +324,7 @@ def render_warehouse_status(
             )
         )
     else:
-        lines.append(f"No rows found in {raw_schema}.airviro_measurement.")
+        lines.append(f"No rows found in {raw_schema}.{measurement_table_name}.")
 
     indicator_rows = status.get("indicator_completeness", [])
     lines.append("")
@@ -410,7 +440,7 @@ def build_parser() -> ArgumentParser:
     )
     bootstrap_parser.add_argument(
         "--schema-sql",
-        default=str(SCHEMA_SQL_PATH),
+        default=default_schema_sql_path(),
         help="Path to schema SQL file",
     )
 
@@ -426,7 +456,7 @@ def build_parser() -> ArgumentParser:
     )
     run_parser.add_argument(
         "--schema-sql",
-        default=str(SCHEMA_SQL_PATH),
+        default=default_schema_sql_path(),
         help="Path to schema SQL file",
     )
     run_parser.add_argument(
@@ -457,7 +487,7 @@ def build_parser() -> ArgumentParser:
     )
     backfill_parser.add_argument(
         "--schema-sql",
-        default=str(SCHEMA_SQL_PATH),
+        default=default_schema_sql_path(),
         help="Path to schema SQL file",
     )
     backfill_parser.add_argument(
@@ -552,7 +582,9 @@ def run_pipeline(
                 verbose,
                 (
                     f"[{source.source_key}] normalized records={len(records)} "
-                    f"rows_read={summary.rows_read} duplicates={summary.duplicate_measurements}"
+                    f"rows_read={summary.rows_read} duplicates={summary.duplicate_measurements} "
+                    f"trimmed_outside_fetch={summary.trimmed_out_of_window} "
+                    f"trimmed_from_padding={summary.trimmed_from_padding}"
                 ),
             )
 
@@ -571,6 +603,8 @@ def run_pipeline(
                             "split_events": summary.split_events,
                             "duplicate_measurements": summary.duplicate_measurements,
                             "warnings": summary.warnings,
+                            "trimmed_out_of_window": summary.trimmed_out_of_window,
+                            "trimmed_from_padding": summary.trimmed_from_padding,
                         },
                         indent=2,
                     )
@@ -601,9 +635,15 @@ def run_pipeline(
 
         if not dry_run:
             assert connection is not None
-            log_verbose(verbose, "[db] refreshing mart dimensions")
-            refresh_dimensions(connection, settings)
-            log_verbose(verbose, "[db] dimension refresh complete")
+            if settings.airviro_refresh_mart_dimensions:
+                log_verbose(verbose, "[db] refreshing legacy mart dimensions")
+                refresh_dimensions(connection, settings)
+                log_verbose(verbose, "[db] dimension refresh complete")
+            else:
+                log_verbose(
+                    verbose,
+                    "[db] skipping legacy mart dimension refresh (handled by dbt for this schema)",
+                )
 
     except Exception as exc:
         if not dry_run and connection is not None:

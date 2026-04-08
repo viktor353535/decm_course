@@ -87,9 +87,9 @@ def collect_warehouse_status(
         raise ValueError("audit_limit must be >= 1")
 
     status: dict[str, Any] = {}
-    measurement_table = f"{settings.airviro_raw_schema}.airviro_measurement"
-    ingestion_audit_table = f"{settings.airviro_raw_schema}.airviro_ingestion_audit"
-    watermark_table = f"{settings.airviro_raw_schema}.pipeline_watermark"
+    measurement_table = settings.measurement_table
+    ingestion_audit_table = settings.ingestion_audit_table
+    watermark_table = settings.pipeline_watermark_table
     with connection.cursor(cursor_factory=extras.RealDictCursor) as cursor:
         cursor.execute(
             """
@@ -115,11 +115,13 @@ def collect_warehouse_status(
         status["table_status"] = table_status
         status["raw_schema"] = settings.airviro_raw_schema
         status["mart_schema"] = settings.airviro_mart_schema
+        status["measurement_table_name"] = settings.measurement_table_name
+        status["ingestion_audit_table_name"] = settings.ingestion_audit_table_name
 
         if not table_status["has_measurement_table"]:
             status["warning"] = (
                 f"{measurement_table} does not exist yet. "
-                "Run bootstrap first: make etl-bootstrap"
+                "Run bootstrap first: make etl-bootstrap or make etl-bootstrap-l5"
             )
             return status
 
@@ -269,6 +271,7 @@ def upsert_measurements(
             row.source_type,
             row.station_id,
             row.observed_at,
+            row.local_hour_occurrence,
             row.indicator_code,
             row.indicator_name,
             row.value_numeric,
@@ -280,17 +283,18 @@ def upsert_measurements(
         return 0
 
     query = f"""
-    INSERT INTO {settings.airviro_raw_schema}.airviro_measurement (
+    INSERT INTO {settings.measurement_table} (
       source_type,
       station_id,
       observed_at,
+      local_hour_occurrence,
       indicator_code,
       indicator_name,
       value_numeric,
       source_row_hash
     )
     VALUES %s
-    ON CONFLICT (source_type, station_id, observed_at, indicator_code)
+    ON CONFLICT (source_type, station_id, observed_at, indicator_code, local_hour_occurrence)
     DO UPDATE SET
       indicator_name = EXCLUDED.indicator_name,
       value_numeric = EXCLUDED.value_numeric,
@@ -310,14 +314,14 @@ def refresh_dimensions(connection: PgConnection, settings: Settings) -> None:
     refresh_sql = f"""
     INSERT INTO {settings.airviro_mart_schema}.dim_indicator (source_type, indicator_code, indicator_name)
     SELECT DISTINCT source_type, indicator_code, indicator_name
-    FROM {settings.airviro_raw_schema}.airviro_measurement
+    FROM {settings.measurement_table}
     ON CONFLICT DO NOTHING;
 
     UPDATE {settings.airviro_mart_schema}.dim_indicator AS target
     SET indicator_name = source.indicator_name
     FROM (
       SELECT DISTINCT source_type, indicator_code, indicator_name
-      FROM {settings.airviro_raw_schema}.airviro_measurement
+      FROM {settings.measurement_table}
     ) AS source
     WHERE target.source_type = source.source_type
       AND target.indicator_code = source.indicator_code
@@ -375,7 +379,7 @@ def refresh_dimensions(connection: PgConnection, settings: Settings) -> None:
       END
     FROM (
       SELECT DISTINCT observed_at
-      FROM {settings.airviro_raw_schema}.airviro_measurement
+      FROM {settings.measurement_table}
     ) AS source
     WHERE NOT EXISTS (
       SELECT 1
@@ -419,7 +423,7 @@ def refresh_dimensions(connection: PgConnection, settings: Settings) -> None:
           WHEN 6 THEN ' Sat'
           ELSE 'Sun'
         END AS day_short
-      FROM {settings.airviro_raw_schema}.airviro_measurement
+      FROM {settings.measurement_table}
     )
     UPDATE {settings.airviro_mart_schema}.dim_datetime_hour AS target
     SET
@@ -480,7 +484,7 @@ def log_ingestion_audit(
     with connection.cursor() as cursor:
         cursor.execute(
             f"""
-            INSERT INTO {settings.airviro_raw_schema}.airviro_ingestion_audit (
+            INSERT INTO {settings.ingestion_audit_table} (
               batch_id,
               source_key,
               source_type,

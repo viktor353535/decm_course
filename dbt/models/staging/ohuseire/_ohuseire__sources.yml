@@ -1,0 +1,28 @@
+version: 2
+
+sources:
+  - name: ohuseire_raw
+    description: Long-form raw Ohuseire measurements loaded by the Python ETL into the Lecture 5 raw schema.
+    schema: "{{ env_var('DBT_SOURCE_RAW_SCHEMA', 'l5_raw') }}"
+    tables:
+      - name: ohuseire_measurement
+        description: One row per source measurement event keyed by source, station, local timestamp, indicator, and repeated-hour occurrence.
+        columns:
+          - name: source_type
+            tests:
+              - not_null
+          - name: station_id
+            tests:
+              - not_null
+          - name: observed_at
+            tests:
+              - not_null
+          - name: local_hour_occurrence
+            tests:
+              - not_null
+          - name: indicator_code
+            tests:
+              - not_null
+          - name: source_row_hash
+            tests:
+              - not_null

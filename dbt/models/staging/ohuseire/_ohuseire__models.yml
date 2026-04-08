@@ -1,0 +1,38 @@
+version: 2
+
+models:
+  - name: stg_ohuseire_measurement
+    description: Canonical long-form measurements used by the Lecture 5 star schema.
+    columns:
+      - name: source_type
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["air_quality", "pollen"]
+      - name: station_key
+        tests:
+          - not_null
+      - name: indicator_key
+        tests:
+          - not_null
+      - name: observed_at
+        tests:
+          - not_null
+      - name: observed_at_local
+        tests:
+          - not_null
+      - name: observed_date
+        tests:
+          - not_null
+      - name: date_key
+        tests:
+          - not_null
+      - name: local_hour_occurrence
+        tests:
+          - not_null
+      - name: indicator_code
+        tests:
+          - not_null
+      - name: source_row_hash
+        tests:
+          - not_null

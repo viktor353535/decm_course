@@ -1,0 +1,56 @@
+version: 2
+
+models:
+  - name: int_air_quality_measurement
+    description: Air-quality measurements enriched with local clock-hour keys, repeated-hour occurrence, and DST-aware completeness expectations.
+    columns:
+      - name: station_key
+        tests:
+          - not_null
+      - name: indicator_key
+        tests:
+          - not_null
+      - name: date_key
+        tests:
+          - not_null
+      - name: hour_key
+        description: Local clock hour extracted from the source timestamp.
+        tests:
+          - not_null
+      - name: hour_occurrence_in_day
+        description: Repeated-hour occurrence within a station, indicator, date, and local clock hour.
+        tests:
+          - not_null
+      - name: slot_sequence_in_day
+        description: Zero-based measurement order within one station, indicator, and date.
+        tests:
+          - not_null
+
+  - name: int_air_quality_hourly_wide
+    description: Convenience pivot used to build the student-facing hourly presentation view.
+    columns:
+      - name: station_key
+        tests:
+          - not_null
+      - name: date_key
+        tests:
+          - not_null
+      - name: hour_key
+        tests:
+          - not_null
+      - name: hour_occurrence_in_day
+        tests:
+          - not_null
+
+  - name: int_pollen_daily
+    description: Daily pollen measurements rolled to one row per station, day, and indicator.
+    columns:
+      - name: station_key
+        tests:
+          - not_null
+      - name: indicator_key
+        tests:
+          - not_null
+      - name: date_key
+        tests:
+          - not_null

@@ -1,0 +1,64 @@
+version: 2
+
+models:
+  - name: fct_air_quality_hourly
+    description: Long-form hourly air-quality fact keyed by station, date, local clock hour, repeated-hour occurrence, and indicator.
+    columns:
+      - name: station_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_station')
+              field: station_key
+      - name: indicator_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_indicator')
+              field: indicator_key
+      - name: date_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_date')
+              field: date_key
+      - name: hour_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_time_hour')
+              field: hour_key
+      - name: hour_occurrence_in_day
+        tests:
+          - not_null
+      - name: observed_at
+        tests:
+          - not_null
+      - name: source_row_hash
+        tests:
+          - not_null
+
+  - name: fct_pollen_daily
+    description: Long-form daily pollen fact keyed by station, date, and indicator.
+    columns:
+      - name: station_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_station')
+              field: station_key
+      - name: indicator_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_indicator')
+              field: indicator_key
+      - name: date_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_date')
+              field: date_key
+      - name: observed_at
+        tests:
+          - not_null

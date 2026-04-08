@@ -3,7 +3,7 @@
 ## What a Devcontainer Is
 
 A devcontainer is a reproducible development environment configuration for VS Code.
-It lets students share the same toolchain without installing most dependencies on host OS.
+It lets us share the same toolchain without installing most dependencies on the host OS.
 
 Reference:
 
@@ -15,7 +15,7 @@ Reference:
 
 1. Lower setup friction across Windows/macOS.
 2. Consistent tool versions.
-3. Easy onboarding for students with limited command-line background.
+3. Easy onboarding when command-line experience is limited.
 
 ## This Repository's Current Setup
 
@@ -84,7 +84,7 @@ Related references:
 - Docker rootless mode: <https://docs.docker.com/engine/security/rootless/>
 - Dockerfile `USER` instruction reference: <https://docs.docker.com/reference/dockerfile/>
 
-## Student Runbook (Core)
+## Core Runbook
 
 1. Open repository in VS Code.
 2. Run `Dev Containers: Reopen in Container`.
@@ -100,6 +100,6 @@ make up-superset
 
 ## Optional Demo Repository
 
-For class demonstration of devcontainer badge behavior on GitHub, use:
+For a devcontainer badge example on GitHub, use:
 
 - <https://github.com/adlerpriit/dev_test>

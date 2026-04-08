@@ -21,6 +21,10 @@ API_TYPE_BY_SOURCE_TYPE = {
     "air_quality": "INDICATOR",
     "pollen": "POLLEN",
 }
+REQUEST_PADDING_DAYS_BY_SOURCE_TYPE = {
+    "air_quality": 1,
+    "pollen": 1,
+}
 KNOWN_INDICATOR_CODE_ALIASES = {
     "temp10": "temp",
     "temp_10": "temp",
@@ -85,6 +89,7 @@ class SourceConfig:
     ordered_indicator_ids: tuple[int, ...]
     indicator_metadata_by_id: dict[int, IndicatorMetadata]
     max_window_days: int
+    request_padding_days: int
     extra_params: dict[str, str]
 
 
@@ -100,6 +105,8 @@ class SourceRunSummary:
     measurements_upserted: int = 0
     duplicate_measurements: int = 0
     split_events: int = 0
+    trimmed_out_of_window: int = 0
+    trimmed_from_padding: int = 0
     warnings: list[str] = field(default_factory=list)
 
 
@@ -110,6 +117,7 @@ class MeasurementRow:
     source_type: str
     station_id: int
     observed_at: datetime
+    local_hour_occurrence: int
     indicator_code: str
     indicator_name: str
     value_numeric: float | None
@@ -386,6 +394,7 @@ def get_source_configs(
                 ordered_indicator_ids=station.indicator_ids,
                 indicator_metadata_by_id=indicator_catalogs["INDICATOR"],
                 max_window_days=settings.air_quality_window_days,
+                request_padding_days=REQUEST_PADDING_DAYS_BY_SOURCE_TYPE["air_quality"],
                 extra_params={
                     "type": API_TYPE_BY_SOURCE_TYPE["air_quality"],
                     "indicators": ",".join(str(value) for value in station.indicator_ids),
@@ -411,6 +420,7 @@ def get_source_configs(
                 ordered_indicator_ids=station.indicator_ids,
                 indicator_metadata_by_id=indicator_catalogs["POLLEN"],
                 max_window_days=settings.pollen_window_days,
+                request_padding_days=REQUEST_PADDING_DAYS_BY_SOURCE_TYPE["pollen"],
                 extra_params={
                     "type": API_TYPE_BY_SOURCE_TYPE["pollen"],
                     "indicators": ",".join(str(value) for value in station.indicator_ids),
@@ -524,6 +534,17 @@ def fetch_source_window(
     raise SourceFetchError("unreachable retry state", retriable=True)
 
 
+def build_fetch_window(
+    source: SourceConfig,
+    requested_start: date,
+    requested_end: date,
+) -> tuple[date, date]:
+    """Expand one logical window with a small overlap to recover boundary rows."""
+
+    padding = timedelta(days=source.request_padding_days)
+    return requested_start - padding, requested_end + padding
+
+
 def parse_localized_numeric(raw_value: str) -> float | None:
     """Parse JSON/string numeric text and return numeric or null."""
 
@@ -536,58 +557,38 @@ def parse_localized_numeric(raw_value: str) -> float | None:
     return float(compact)
 
 
-def should_normalize_staggered_rows(
-    source: SourceConfig,
-    rows: list[MonitoringApiRow],
+def measurement_is_inside_window(
+    *,
+    source_type: str,
+    observed_at: datetime,
     window_start: date,
     window_end: date,
 ) -> bool:
-    """Detect older API payloads whose timestamps are staggered by indicator order."""
+    """Return whether one measurement falls inside one inclusive logical window.
 
-    if not rows or not source.ordered_indicator_ids:
-        return False
+    We intentionally trust the timestamp carried by each measurement instead of
+    reindexing rows by indicator position. Around source boundary shifts or DST
+    edges, that means a response can contain leading/trailing rows that belong
+    outside the logical window. We keep the long-form natural key and trim by
+    explicit window bounds so overlapping fetch windows can stitch cleanly.
+    """
 
-    expected_slot_count = (window_end - window_start).days + 1
-    if source.source_type != "pollen":
-        expected_slot_count *= 24
+    if source_type == "pollen":
+        return window_start <= observed_at.date() <= window_end
 
-    distinct_timestamps = {row.measured_at for row in rows}
-    return len(distinct_timestamps) > expected_slot_count
-
-
-def normalize_staggered_rows(
-    source: SourceConfig,
-    rows: list[MonitoringApiRow],
-) -> list[MonitoringApiRow]:
-    """Shift older staggered timestamps back to the source grain."""
-
-    indicator_offsets = {
-        indicator_id: index + 1
-        for index, indicator_id in enumerate(source.ordered_indicator_ids)
-    }
-
-    normalized: list[MonitoringApiRow] = []
-    for row in rows:
-        offset_hours = indicator_offsets.get(row.indicator_id)
-        if offset_hours is None:
-            return rows
-        normalized.append(
-            MonitoringApiRow(
-                measured_at=row.measured_at - timedelta(hours=offset_hours),
-                indicator_id=row.indicator_id,
-                raw_value=row.raw_value,
-                value_numeric=row.value_numeric,
-            )
-        )
-    return normalized
+    lower_bound = datetime.combine(window_start, day_time.min)
+    upper_bound = datetime.combine(window_end, day_time(hour=23))
+    return lower_bound <= observed_at <= upper_bound
 
 
 def parse_monitoring_json(
     source: SourceConfig,
     payload_text: str,
-    window_start: date,
-    window_end: date,
-) -> tuple[list[MeasurementRow], int, int]:
+    requested_window_start: date,
+    requested_window_end: date,
+    fetch_window_start: date,
+    fetch_window_end: date,
+) -> tuple[list[MeasurementRow], int, int, int, int]:
     """Parse monitoring JSON into normalized long-form measurements."""
 
     try:
@@ -655,11 +656,11 @@ def parse_monitoring_json(
         preview = "; ".join(parse_errors[:8])
         raise DataQualityError(f"{source.source_type}: {len(parse_errors)} parse errors. {preview}")
 
-    if should_normalize_staggered_rows(source, api_rows, window_start, window_end):
-        api_rows = normalize_staggered_rows(source, api_rows)
-
-    measurements: dict[tuple[str, int, datetime, str], MeasurementRow] = {}
+    measurements: dict[tuple[str, int, datetime, str, int], MeasurementRow] = {}
+    local_hour_occurrences: Counter[tuple[str, int, datetime, str]] = Counter()
     duplicates = 0
+    trimmed_from_padding = 0
+    trimmed_out_of_window = 0
 
     for row in api_rows:
         metadata = source.indicator_metadata_by_id.get(row.indicator_id)
@@ -668,16 +669,44 @@ def parse_monitoring_json(
                 f"{source.source_type}: indicator_id={row.indicator_id} was not found in API metadata"
             )
 
+        if not measurement_is_inside_window(
+            source_type=source.source_type,
+            observed_at=row.measured_at,
+            window_start=fetch_window_start,
+            window_end=fetch_window_end,
+        ):
+            trimmed_out_of_window += 1
+            continue
+        if not measurement_is_inside_window(
+            source_type=source.source_type,
+            observed_at=row.measured_at,
+            window_start=requested_window_start,
+            window_end=requested_window_end,
+        ):
+            trimmed_from_padding += 1
+            continue
+
+        occurrence_key = (
+            source.source_type,
+            source.station_id,
+            row.measured_at,
+            metadata.indicator_code,
+        )
+        local_hour_occurrences[occurrence_key] += 1
+        local_hour_occurrence = local_hour_occurrences[occurrence_key]
+
         source_row_hash = hashlib.sha1(
-            f"{source.source_type}|{source.station_id}|{row.measured_at.isoformat()}|{metadata.indicator_code}|{row.raw_value}".encode(
-                "utf-8"
-            )
+            (
+                f"{source.source_type}|{source.station_id}|{row.measured_at.isoformat()}|"
+                f"{metadata.indicator_code}|{local_hour_occurrence}|{row.raw_value}"
+            ).encode("utf-8")
         ).hexdigest()
 
         record = MeasurementRow(
             source_type=source.source_type,
             station_id=source.station_id,
             observed_at=row.measured_at,
+            local_hour_occurrence=local_hour_occurrence,
             indicator_code=metadata.indicator_code,
             indicator_name=metadata.indicator_name,
             value_numeric=row.value_numeric,
@@ -689,43 +718,59 @@ def parse_monitoring_json(
             record.station_id,
             record.observed_at,
             record.indicator_code,
+            record.local_hour_occurrence,
         )
         if key in measurements:
             duplicates += 1
         measurements[key] = record
 
-    return list(measurements.values()), rows_read, duplicates
+    return (
+        list(measurements.values()),
+        rows_read,
+        duplicates,
+        trimmed_from_padding,
+        trimmed_out_of_window,
+    )
 
 
 def extract_window_with_split(
     settings: Settings,
     source: SourceConfig,
-    window_start: date,
-    window_end: date,
+    requested_window_start: date,
+    requested_window_end: date,
     summary: SourceRunSummary,
+    fetch_window_start: date | None = None,
+    fetch_window_end: date | None = None,
     progress: ProgressCallback | None = None,
 ) -> list[MeasurementRow]:
     """Extract and parse one window, recursively splitting on retriable failures."""
+
+    if fetch_window_start is None or fetch_window_end is None:
+        fetch_window_start, fetch_window_end = build_fetch_window(
+            source,
+            requested_window_start,
+            requested_window_end,
+        )
 
     summary.windows_requested += 1
     try:
         payload_text = fetch_source_window(
             settings=settings,
             source=source,
-            window_start=window_start,
-            window_end=window_end,
+            window_start=fetch_window_start,
+            window_end=fetch_window_end,
             retry_count=settings.request_retries,
             progress=progress,
         )
     except SourceFetchError as exc:
-        span_days = (window_end - window_start).days + 1
+        span_days = (fetch_window_end - fetch_window_start).days + 1
         should_split = exc.retriable and span_days > settings.minimum_split_window_days
         if not should_split:
             raise
 
         summary.split_events += 1
         split_size = span_days // 2
-        left_end = window_start + timedelta(days=split_size - 1)
+        left_end = fetch_window_start + timedelta(days=split_size - 1)
         right_start = left_end + timedelta(days=1)
         if progress is not None:
             progress(
@@ -733,45 +778,71 @@ def extract_window_with_split(
                     "event": "window_split",
                     "source_key": source.source_key,
                     "source_type": source.source_type,
-                    "window_start": window_start.isoformat(),
-                    "window_end": window_end.isoformat(),
-                    "left_window_start": window_start.isoformat(),
+                    "window_start": fetch_window_start.isoformat(),
+                    "window_end": fetch_window_end.isoformat(),
+                    "left_window_start": fetch_window_start.isoformat(),
                     "left_window_end": left_end.isoformat(),
                     "right_window_start": right_start.isoformat(),
-                    "right_window_end": window_end.isoformat(),
+                    "right_window_end": fetch_window_end.isoformat(),
                     "split_events_total": summary.split_events,
                 }
             )
         left = extract_window_with_split(
             settings,
             source,
-            window_start,
-            left_end,
+            requested_window_start,
+            requested_window_end,
             summary,
+            fetch_window_start=fetch_window_start,
+            fetch_window_end=left_end,
             progress=progress,
         )
         right = extract_window_with_split(
             settings,
             source,
-            right_start,
-            window_end,
+            requested_window_start,
+            requested_window_end,
             summary,
+            fetch_window_start=right_start,
+            fetch_window_end=fetch_window_end,
             progress=progress,
         )
         return left + right
 
-    records, rows_read, duplicates = parse_monitoring_json(
+    records, rows_read, duplicates, trimmed_from_padding, trimmed_out_of_window = parse_monitoring_json(
         source,
         payload_text,
-        window_start,
-        window_end,
+        requested_window_start,
+        requested_window_end,
+        fetch_window_start,
+        fetch_window_end,
     )
     summary.rows_read += rows_read
     summary.duplicate_measurements += duplicates
+    summary.trimmed_from_padding += trimmed_from_padding
+    summary.trimmed_out_of_window += trimmed_out_of_window
+    if trimmed_out_of_window:
+        trim_warning = (
+            f"{source.source_key}: dropped {trimmed_out_of_window} row(s) outside padded fetch window "
+            f"{fetch_window_start.isoformat()}..{fetch_window_end.isoformat()} while serving "
+            f"{requested_window_start.isoformat()}..{requested_window_end.isoformat()}"
+        )
+        summary.warnings.append(trim_warning)
+        if progress is not None:
+            progress(
+                {
+                    "event": "coverage_warning",
+                    "source_key": source.source_key,
+                    "source_type": source.source_type,
+                    "window_start": requested_window_start.isoformat(),
+                    "window_end": requested_window_end.isoformat(),
+                    "warning": trim_warning,
+                }
+            )
     coverage_warning = build_window_coverage_warning(
         source=source,
-        window_start=window_start,
-        window_end=window_end,
+        window_start=requested_window_start,
+        window_end=requested_window_end,
         records=records,
     )
     if coverage_warning is not None:
@@ -782,8 +853,8 @@ def extract_window_with_split(
                     "event": "coverage_warning",
                     "source_key": source.source_key,
                     "source_type": source.source_type,
-                    "window_start": window_start.isoformat(),
-                    "window_end": window_end.isoformat(),
+                    "window_start": requested_window_start.isoformat(),
+                    "window_end": requested_window_end.isoformat(),
                     "warning": coverage_warning,
                 }
             )
@@ -873,12 +944,14 @@ def build_source_records(
                 "from_date": start_date.isoformat(),
                 "to_date": end_date.isoformat(),
                 "max_window_days": source.max_window_days,
+                "request_padding_days": source.request_padding_days,
                 "top_level_window_count": total_windows,
             }
         )
 
-    all_records: dict[tuple[str, int, datetime, str], MeasurementRow] = {}
+    all_records: dict[tuple[str, int, datetime, str, int], MeasurementRow] = {}
     for index, (window_start, window_end) in enumerate(windows, start=1):
+        fetch_window_start, fetch_window_end = build_fetch_window(source, window_start, window_end)
         if progress is not None:
             progress(
                 {
@@ -889,17 +962,23 @@ def build_source_records(
                     "window_count": total_windows,
                     "window_start": window_start.isoformat(),
                     "window_end": window_end.isoformat(),
+                    "fetch_window_start": fetch_window_start.isoformat(),
+                    "fetch_window_end": fetch_window_end.isoformat(),
                 }
             )
         rows_before = summary.rows_read
         duplicates_before = summary.duplicate_measurements
+        trimmed_before = summary.trimmed_out_of_window
+        trimmed_from_padding_before = summary.trimmed_from_padding
         windows_requested_before = summary.windows_requested
         records = extract_window_with_split(
             settings=settings,
             source=source,
-            window_start=window_start,
-            window_end=window_end,
+            requested_window_start=window_start,
+            requested_window_end=window_end,
             summary=summary,
+            fetch_window_start=fetch_window_start,
+            fetch_window_end=fetch_window_end,
             progress=progress,
         )
         cross_window_duplicates = 0
@@ -909,6 +988,7 @@ def build_source_records(
                 record.station_id,
                 record.observed_at,
                 record.indicator_code,
+                record.local_hour_occurrence,
             )
             if key in all_records:
                 cross_window_duplicates += 1
@@ -924,12 +1004,19 @@ def build_source_records(
                     "window_count": total_windows,
                     "window_start": window_start.isoformat(),
                     "window_end": window_end.isoformat(),
+                    "fetch_window_start": fetch_window_start.isoformat(),
+                    "fetch_window_end": fetch_window_end.isoformat(),
                     "rows_read_window": summary.rows_read - rows_before,
                     "rows_read_total": summary.rows_read,
                     "records_normalized_window": len(records) - cross_window_duplicates,
                     "records_normalized_total": len(all_records),
                     "duplicates_window": summary.duplicate_measurements - duplicates_before,
                     "duplicates_total": summary.duplicate_measurements,
+                    "trimmed_out_of_window_window": summary.trimmed_out_of_window - trimmed_before,
+                    "trimmed_out_of_window_total": summary.trimmed_out_of_window,
+                    "trimmed_from_padding_window": summary.trimmed_from_padding
+                    - trimmed_from_padding_before,
+                    "trimmed_from_padding_total": summary.trimmed_from_padding,
                     "windows_requested_window": summary.windows_requested - windows_requested_before,
                     "windows_requested_total": summary.windows_requested,
                     "split_events_total": summary.split_events,
@@ -947,6 +1034,8 @@ def build_source_records(
                 "rows_read_total": summary.rows_read,
                 "records_normalized_total": len(all_records),
                 "duplicates_total": summary.duplicate_measurements,
+                "trimmed_out_of_window_total": summary.trimmed_out_of_window,
+                "trimmed_from_padding_total": summary.trimmed_from_padding,
                 "split_events_total": summary.split_events,
             }
         )

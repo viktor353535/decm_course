@@ -27,6 +27,8 @@ For small and localized edits, implement directly without an ExecPlan.
 - Keep functions small and composable; avoid hidden global state.
 - Make side effects obvious and isolated (I/O, network, filesystem, database).
 - Use stable, descriptive names for modules, functions, variables, env vars, and compose services.
+- When a tool has an official, widely taught project layout (for example dbt), prefer that layout unless the repo has a clear teaching reason to deviate.
+- If you do deviate from an official layout, document the reason near the code and in the relevant lesson docs.
 - Keep scripts non-interactive by default so agents and CI can run them end-to-end.
 - Use deterministic commands and document required working directory for each command.
 - Make idempotent setup and bootstrap paths a priority (`up`, `init`, `seed`, `reset` should be safe to re-run).
@@ -40,6 +42,8 @@ For small and localized edits, implement directly without an ExecPlan.
 - Whenever behavior changes, update related Markdown docs (`README.md`, lesson notes, runbooks).
 - Prefer examples students can copy and run as-is.
 - Avoid unnecessary abstractions in instructional code; introduce complexity only when it teaches a clear concept.
+- Keep repository structure explorable. Group files by the mental model students are learning, not by clever implementation shortcuts.
+- When one container includes multiple tools for teaching convenience, keep their runtimes isolated when practical and explain the tradeoff in docs.
 
 ## Documentation Minimums for Changes
 

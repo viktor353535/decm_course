@@ -1,0 +1,62 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: Calendar dimension used by both hourly and daily facts.
+    columns:
+      - name: date_key
+        tests:
+          - not_null
+          - unique
+      - name: date_value
+        tests:
+          - not_null
+          - unique
+
+  - name: dim_time_hour
+    description: 24-row local clock-hour dimension keyed by hour number 0..23.
+    columns:
+      - name: hour_key
+        tests:
+          - not_null
+          - unique
+      - name: hour_label
+        tests:
+          - not_null
+
+  - name: dim_station
+    description: Repo-defined station metadata for the stations used in the course.
+    columns:
+      - name: station_key
+        tests:
+          - not_null
+          - unique
+      - name: station_id
+        tests:
+          - not_null
+
+  - name: dim_indicator
+    description: Indicator lookup keyed by source type and indicator code.
+    columns:
+      - name: indicator_key
+        tests:
+          - not_null
+          - unique
+      - name: indicator_code
+        tests:
+          - not_null
+      - name: indicator_name
+        tests:
+          - not_null
+
+  - name: dim_wind_direction
+    description: 8-sector wind direction lookup.
+    columns:
+      - name: sector_id
+        tests:
+          - not_null
+          - unique
+      - name: sector_code
+        tests:
+          - not_null
+          - unique
