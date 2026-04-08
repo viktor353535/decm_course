@@ -309,3 +309,5 @@ Use these follow-up materials:
   [operations.md](./operations.md)
 - dbt structure and model notes:
   [dbt README](../../../dbt/README.md)
+- updating from a working Lecture 4 setup:
+  [updating-from-lecture-04.md](./updating-from-lecture-04.md)
