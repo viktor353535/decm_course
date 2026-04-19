@@ -81,6 +81,10 @@ Direct equivalent:
 docker compose --profile superset --profile airflow up -d
 ```
 
+Inside this repository, prefer the `make up-*` targets from the devcontainer.
+They resolve the workspace bind-mount path for the host Docker daemon, which matters on Windows-hosted setups.
+For debugging, run `make print-host-workspace` to inspect the final path passed to Compose.
+
 References:
 
 - Compose overview: <https://docs.docker.com/compose/>
@@ -115,4 +119,3 @@ Security note:
 
 - On Linux, membership in `docker` group effectively grants root-level capabilities on the host.
   Reference: <https://docs.docker.com/engine/install/linux-postinstall/>
-

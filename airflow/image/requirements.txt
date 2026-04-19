@@ -1,5 +1,0 @@
-# dbt is installed into /opt/dbt-venv in the custom Airflow image.
-# Keeping it isolated avoids conflicts with Airflow runtime dependencies.
-# Keep dbt-core and adapter versions aligned.
-dbt-core==1.9.1
-dbt-postgres==1.9.1

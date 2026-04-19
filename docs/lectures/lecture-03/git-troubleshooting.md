@@ -1,6 +1,6 @@
 # Git Troubleshooting (VS Code + GitHub)
 
-This guide targets common Git issues in VS Code, especially when students have old setups from previous courses or multiple GitHub accounts.
+This guide targets common Git issues in VS Code, especially when older local setups or multiple GitHub accounts get mixed together.
 
 ## Fast Diagnostic Checklist
 
@@ -90,7 +90,7 @@ Symptoms:
 
 1. Commits show previous course account name/email.
 
-Fix (repo-local recommended for classes):
+Fix (repo-local is the safest default here):
 
 ```bash
 git config user.name "Your Name"
@@ -140,11 +140,11 @@ Use only if regular sign-out/sign-in fails:
 3. Restart VS Code.
 4. Sign in again.
 
-## 8) If students are blocked in class
+## 8) If Git UI still blocks progress
 
-Fallback path to keep class moving:
+Fallback path to keep work moving:
 
-1. Pair with a nearby student for one commit flow.
+1. Pair with a nearby partner for one commit flow.
 2. Use CLI fallback for commit + push:
 
 ```bash
@@ -153,5 +153,4 @@ git commit -m "lecture1: first commit"
 git push -u origin <branch-name>
 ```
 
-3. Return to VS Code UI flow after class with this troubleshooting guide.
-
+3. Return to the VS Code UI flow after the first successful push.

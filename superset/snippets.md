@@ -3,6 +3,7 @@
 This file collects copy-paste SQL snippets for common chart customizations in Superset.
 
 Dataset used in examples:
+- `l4_mart.v_air_quality_hourly_station_8`
 - `mart.v_air_quality_hourly`
 
 How to use these:
@@ -11,9 +12,25 @@ How to use these:
 - Use the output alias as chart dimension/metric fields.
 - Prefer numeric sort columns (`month_number`, `day_of_week_number`) when a chart type supports custom sorting.
 
+## Preferred Built-In Short Labels
+
+The datetime dimension now exposes these ready-made sortable labels:
+- `month_short`
+- `day_short`
+
+These two columns intentionally use leading spaces so that plain alphabetic sorting still produces chronological order in Superset.
+
+Use:
+- `month_short` when you want `Jan`, `Feb`, ... in chronological order
+- `day_short` when you want `Mon`, `Tue`, ... in chronological order
+
+If a visualization supports sort-by-column cleanly, you can still use:
+- `month_name` sorted by `month_number`
+- `day_name` sorted by `day_of_week_number`
+
 ## Month Names In Logical Order (Space-Padded Label)
 
-Use this as a calculated column when a chart/pivot only supports alphabetic sorting on labels.
+This is now baked into `month_short` in the warehouse. Keep it here as a reference.
 
 ```sql
 CASE
@@ -59,7 +76,7 @@ END
 
 ## Weekday Names In Logical Order (Space-Padded Label)
 
-Use this as a calculated column when weekday labels would otherwise sort alphabetically.
+This is now baked into `day_short` in the warehouse. Keep it here as a reference.
 
 ```sql
 CASE

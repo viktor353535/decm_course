@@ -1,0 +1,50 @@
+version: 2
+
+models:
+  - name: v_air_quality_hourly
+    description: Wide hourly presentation view for Superset, built from the long-form hourly fact.
+    columns:
+      - name: station_key
+        tests:
+          - not_null
+      - name: date_key
+        tests:
+          - not_null
+      - name: hour_key
+        tests:
+          - not_null
+      - name: hour_occurrence_in_day
+        tests:
+          - not_null
+      - name: observed_at
+        tests:
+          - not_null
+
+  - name: v_pollen_daily
+    description: Daily pollen presentation view with station and calendar context.
+    columns:
+      - name: station_key
+        tests:
+          - not_null
+      - name: date_key
+        tests:
+          - not_null
+      - name: indicator_key
+        tests:
+          - not_null
+
+  - name: v_ohuseire_measurements_long
+    description: Long-form exploratory view that keeps the raw measurement grain visible for teaching.
+    columns:
+      - name: source_type
+        tests:
+          - not_null
+      - name: station_key
+        tests:
+          - not_null
+      - name: indicator_key
+        tests:
+          - not_null
+      - name: observed_at
+        tests:
+          - not_null

@@ -2,7 +2,7 @@
 
 ## Core Path
 
-This guide focuses on features students will use in this course every week.
+This guide focuses on the VS Code features we will use in this course every week.
 
 ## Required Extensions for This Course
 
@@ -66,4 +66,3 @@ make up-superset
    - Toggle terminal: ``Ctrl+` `` / ``Cmd+` ``
 2. Explore settings sync and profile export for lab machines.
 3. Add optional AI extension, but keep all core steps tool-agnostic.
-

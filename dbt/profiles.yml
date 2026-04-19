@@ -1,4 +1,4 @@
-airviro_course:
+ohuseire_course:
   target: dev
   outputs:
     dev:
@@ -8,7 +8,6 @@ airviro_course:
       user: "{{ env_var('WAREHOUSE_DB_USER', 'warehouse') }}"
       password: "{{ env_var('WAREHOUSE_DB_PASSWORD', 'warehouse') }}"
       dbname: "{{ env_var('WAREHOUSE_DB_NAME', 'warehouse') }}"
-      schema: mart
+      schema: "{{ env_var('DBT_TARGET_SCHEMA', 'l5_mart') }}"
       threads: 4
       connect_timeout: 10
-

@@ -8,4 +8,3 @@ select
   cast(max_degree as double precision) as max_degree,
   cast(wraps_around as boolean) as wraps_around
 from {{ ref('dim_wind_direction_seed') }}
-

@@ -66,12 +66,93 @@ CREATE TABLE IF NOT EXISTS mart.dim_datetime_hour (
   quarter_number integer NOT NULL,
   month_number integer NOT NULL,
   month_name text NOT NULL,
+  month_short text NOT NULL,
   day_number integer NOT NULL,
   hour_number integer NOT NULL,
   iso_week_number integer NOT NULL,
   day_of_week_number integer NOT NULL,
-  day_name text NOT NULL
+  day_name text NOT NULL,
+  day_short text NOT NULL
 );
+
+ALTER TABLE mart.dim_datetime_hour
+  ADD COLUMN IF NOT EXISTS month_short text;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'mart'
+      AND table_name = 'dim_datetime_hour'
+      AND column_name = 'weekday_short'
+  ) AND NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'mart'
+      AND table_name = 'dim_datetime_hour'
+      AND column_name = 'day_short'
+  ) THEN
+    ALTER TABLE mart.dim_datetime_hour RENAME COLUMN weekday_short TO day_short;
+  END IF;
+END $$;
+
+ALTER TABLE mart.dim_datetime_hour
+  ADD COLUMN IF NOT EXISTS day_short text;
+
+UPDATE mart.dim_datetime_hour
+SET
+  month_name = TRIM(TO_CHAR(observed_at, 'Month')),
+  month_short = CASE EXTRACT(MONTH FROM observed_at)::int
+    WHEN 1 THEN '           Jan'
+    WHEN 2 THEN '          Feb'
+    WHEN 3 THEN '         Mar'
+    WHEN 4 THEN '        Apr'
+    WHEN 5 THEN '       May'
+    WHEN 6 THEN '      Jun'
+    WHEN 7 THEN '     Jul'
+    WHEN 8 THEN '    Aug'
+    WHEN 9 THEN '   Sep'
+    WHEN 10 THEN '  Oct'
+    WHEN 11 THEN ' Nov'
+    ELSE 'Dec'
+  END,
+  day_name = TRIM(TO_CHAR(observed_at, 'Dy')),
+  day_short = CASE EXTRACT(ISODOW FROM observed_at)::int
+    WHEN 1 THEN '      Mon'
+    WHEN 2 THEN '     Tue'
+    WHEN 3 THEN '    Wed'
+    WHEN 4 THEN '   Thu'
+    WHEN 5 THEN '  Fri'
+    WHEN 6 THEN ' Sat'
+    ELSE 'Sun'
+  END
+WHERE
+  month_name IS DISTINCT FROM TRIM(TO_CHAR(observed_at, 'Month'))
+  OR month_short IS DISTINCT FROM CASE EXTRACT(MONTH FROM observed_at)::int
+    WHEN 1 THEN '           Jan'
+    WHEN 2 THEN '          Feb'
+    WHEN 3 THEN '         Mar'
+    WHEN 4 THEN '        Apr'
+    WHEN 5 THEN '       May'
+    WHEN 6 THEN '      Jun'
+    WHEN 7 THEN '     Jul'
+    WHEN 8 THEN '    Aug'
+    WHEN 9 THEN '   Sep'
+    WHEN 10 THEN '  Oct'
+    WHEN 11 THEN ' Nov'
+    ELSE 'Dec'
+  END
+  OR day_name IS DISTINCT FROM TRIM(TO_CHAR(observed_at, 'Dy'))
+  OR day_short IS DISTINCT FROM CASE EXTRACT(ISODOW FROM observed_at)::int
+    WHEN 1 THEN '      Mon'
+    WHEN 2 THEN '     Tue'
+    WHEN 3 THEN '    Wed'
+    WHEN 4 THEN '   Thu'
+    WHEN 5 THEN '  Fri'
+    WHEN 6 THEN ' Sat'
+    ELSE 'Sun'
+  END;
 
 CREATE TABLE IF NOT EXISTS mart.dim_wind_direction (
   sector_id integer PRIMARY KEY,
@@ -108,7 +189,9 @@ SELECT
   m.extracted_at
 FROM raw.airviro_measurement AS m;
 
-CREATE OR REPLACE VIEW mart.v_air_quality_hourly AS
+DROP VIEW IF EXISTS mart.v_air_quality_hourly;
+
+CREATE VIEW mart.v_air_quality_hourly AS
 WITH air_quality AS (
   SELECT
     station_id,
@@ -155,7 +238,9 @@ SELECT
   aq.hum,
   aq.rain,
   aq.press,
-  aq.rad
+  aq.rad,
+  dt.month_short,
+  dt.day_short
 FROM air_quality AS aq
 LEFT JOIN mart.dim_datetime_hour AS dt
   ON dt.observed_at = aq.observed_at

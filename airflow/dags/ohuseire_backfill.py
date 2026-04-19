@@ -1,4 +1,4 @@
-"""Manual Airviro backfill DAG with configurable range/chunk parameters."""
+"""Manual Ohuseire backfill DAG with configurable range/chunk parameters."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 from airflow.sdk import Param, dag, task
 import pendulum
 
-import airviro_dag_utils as utils
+import ohuseire_dag_utils as utils
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -17,8 +17,8 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 @dag(
-    dag_id="airviro_backfill",
-    description="Manual backfill ETL + dbt pipeline for historical ranges.",
+    dag_id="ohuseire_backfill",
+    description="Manual Ohuseire ETL + dbt pipeline for historical ranges.",
     schedule=None,
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
@@ -30,9 +30,9 @@ def _env_bool(name: str, default: bool) -> bool:
         "source_keys": Param("", type="string"),
         "advance_watermark": Param(True, type="boolean"),
     },
-    tags=["course", "airviro", "etl", "dbt", "backfill"],
+    tags=["course", "ohuseire", "etl", "dbt", "backfill"],
 )
-def airviro_backfill() -> None:
+def ohuseire_backfill() -> None:
     @task(task_id="ensure_prerequisites")
     def ensure_prerequisites() -> None:
         utils.ensure_etl_schema()
@@ -88,11 +88,14 @@ def airviro_backfill() -> None:
 
     @task(task_id="run_backfill_windows")
     def run_backfill_windows(plan: dict[str, object]) -> None:
-        verbose = _env_bool("AIRFLOW_AIRVIRO_BACKFILL_VERBOSE", False)
+        verbose = _env_bool(
+            "AIRFLOW_OHUSEIRE_BACKFILL_VERBOSE",
+            _env_bool("AIRFLOW_AIRVIRO_BACKFILL_VERBOSE", False),
+        )
         windows: list[dict[str, str]] = list(plan["windows"])  # type: ignore[arg-type]
         source_keys: list[str] = list(plan["source_keys"])  # type: ignore[arg-type]
         print(
-            "[airviro] backfill plan: "
+            "[ohuseire] backfill plan: "
             f"{plan['start_date']}..{plan['end_date']} "
             f"in {plan['window_count']} windows (chunk_days={plan['chunk_days']}), "
             f"sources={','.join(source_keys)}"
@@ -102,7 +105,7 @@ def airviro_backfill() -> None:
                 from_date = utils.parse_iso_date(window["from_date"])
                 to_date = utils.parse_iso_date(window["to_date"])
                 print(
-                    "[airviro] backfill window "
+                    "[ohuseire] backfill window "
                     f"{index}/{len(windows)} for {source_key}: "
                     f"{from_date.isoformat()}..{to_date.isoformat()}"
                 )
@@ -115,7 +118,7 @@ def airviro_backfill() -> None:
     @task(task_id="maybe_advance_watermark")
     def maybe_advance_watermark(plan: dict[str, object]) -> None:
         if not bool(plan["advance_watermark"]):
-            print("[airviro] skipping watermark update (advance_watermark=false)")
+            print("[ohuseire] skipping watermark update (advance_watermark=false)")
             return
 
         end_date = utils.parse_iso_date(str(plan["end_date"]))
@@ -126,7 +129,7 @@ def airviro_backfill() -> None:
             watermark_key = utils.incremental_source_watermark_key(source_key)
             utils.set_watermark_greatest(watermark_key, watermark_candidate)
             print(
-                "[airviro] watermark updated with greatest(end_date): "
+                "[ohuseire] watermark updated with greatest(end_date): "
                 f"{watermark_key} -> {watermark_candidate.isoformat()} "
                 f"(requested_end_date={end_date.isoformat()})"
             )
@@ -146,4 +149,4 @@ def airviro_backfill() -> None:
     prerequisites >> plan >> backfill >> dbt_task >> watermark
 
 
-airviro_backfill()
+ohuseire_backfill()

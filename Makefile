@@ -1,14 +1,51 @@
 SHELL := /bin/bash
 ENV_FILE := .env
-HOST_WORKSPACE ?= $(PWD)
-export HOST_WORKSPACE
+WORKSPACE_DIR := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
+HOST_WORKSPACE ?= $(WORKSPACE_DIR)
+# Docker commands run inside the devcontainer against the host daemon through the
+# mounted socket, so bind mounts must use the daemon-visible workspace path.
+RESOLVE_HOST_WORKSPACE = \
+	requested_path="$(HOST_WORKSPACE)"; \
+	if [ -z "$$requested_path" ]; then \
+		requested_path="$(WORKSPACE_DIR)"; \
+	fi; \
+	path=""; \
+	inspected_path=""; \
+	if printf "%s" "$$requested_path" | grep -Eq "^/.*[A-Za-z]:[\\\\/]"; then \
+		echo "HOST_WORKSPACE contains an invalid mixed path: $$requested_path" >&2; \
+		exit 1; \
+	elif printf "%s" "$$requested_path" | grep -Eq "^[A-Za-z]:[\\\\/]"; then \
+		drive="$$(printf "%s" "$$requested_path" | cut -c1 | tr "[:upper:]" "[:lower:]")"; \
+		rest="$$(printf "%s" "$$requested_path" | sed -E "s@^[A-Za-z]:[\\\\/]?@@; s@\\\\@/@g")"; \
+		path="/run/desktop/mnt/host/$$drive/$$rest"; \
+	elif [ "$$requested_path" != "$(WORKSPACE_DIR)" ]; then \
+		path="$$requested_path"; \
+	fi; \
+	if [ -z "$$path" ]; then \
+	inspected_path="$$(sudo docker inspect "$$(hostname)" --format '{{range .Mounts}}{{if eq .Destination "$(WORKSPACE_DIR)"}}{{println .Source}}{{end}}{{end}}' 2>/dev/null | head -n 1)"; \
+	if [ -n "$$inspected_path" ]; then \
+		path="$$inspected_path"; \
+	else \
+		path="$$requested_path"; \
+	fi; \
+	fi; \
+	if [ -z "$$path" ]; then \
+		echo "HOST_WORKSPACE is not set." >&2; \
+		exit 1; \
+	elif ! printf "%s" "$$path" | grep -Eq '^/'; then \
+		echo "HOST_WORKSPACE must be an absolute path. Current value: $$path" >&2; \
+		exit 1; \
+	fi;
 # TODO(option-3): remove sudo once devcontainer user has direct Docker socket access.
-COMPOSE := sudo --preserve-env=HOST_WORKSPACE docker compose --env-file $(ENV_FILE)
+COMPOSE := $(RESOLVE_HOST_WORKSPACE) sudo env HOST_WORKSPACE="$$path" docker compose --env-file $(ENV_FILE)
 PROFILES_SUPERSET := --profile superset
 PROFILES_AIRFLOW := --profile airflow
+PROFILES_DBT_DOCS := --profile dbt-docs
 ETL_VERBOSE_FLAG := $(if $(filter 1 true yes,$(VERBOSE)),--verbose,)
 DBT_PROJECT_DIR := /opt/airflow/dbt
-DAG_ID ?= airviro_incremental
+DBT_DOCS_PORT ?= 8081
+LECTURE4_SOURCE_KEYS := --source-key air_quality_station_8 --source-key pollen_station_25
+DAG_ID ?= ohuseire_incremental
 BACKFILL_START ?= 2020-01-01
 BACKFILL_END ?=
 BACKFILL_CHUNK_DAYS ?= 31
@@ -16,10 +53,11 @@ BACKFILL_SOURCE_KEYS ?=
 BACKFILL_ADVANCE_WATERMARK ?= true
 STATUS_INDICATOR_LIMIT ?= 500
 STATUS_AUDIT_LIMIT ?= 10
+LECTURE5_TABLE_ENV := OHUSEIRE_RAW_SCHEMA=l5_raw OHUSEIRE_MART_SCHEMA=l5_mart OHUSEIRE_MEASUREMENT_TABLE=ohuseire_measurement OHUSEIRE_INGESTION_AUDIT_TABLE=ohuseire_ingestion_audit
 
-.PHONY: help init check-host-workspace up-superset up-airflow up-all down logs ps reset-volumes reset-all \
-	etl-bootstrap etl-dry-run etl-backfill-2020-2025 etl-backfill-2020-today warehouse-status warehouse-status-json \
-	devcontainer-join-course-network dbt-debug dbt-seed dbt-run dbt-test dbt-build \
+.PHONY: help init check-host-workspace print-host-workspace up-superset up-airflow up-all down logs ps reset-volumes reset-all reset-l5 \
+	etl-bootstrap etl-bootstrap-l5 etl-dry-run etl-backfill-2020-2025 etl-backfill-2020-today warehouse-status warehouse-status-json warehouse-status-l5 pgduckdb-bootstrap \
+	devcontainer-join-course-network devcontainer-leave-course-network dbt-debug dbt-seed dbt-run dbt-test dbt-build dbt-docs dbt-docs-serve \
 	airflow-list-dags airflow-list-runs airflow-trigger-incremental airflow-trigger-backfill \
 	airflow-unpause-dags airflow-pause-dags
 
@@ -29,31 +67,39 @@ help:
 	@echo "  make up-superset    Start Superset stack (profile: superset)"
 	@echo "  make up-airflow     Start Airflow stack (profile: airflow)"
 	@echo "  make up-all         Start Superset + Airflow"
-	@echo "  make down           Stop and remove containers"
+	@echo "  make down           Stop/remove containers and detach devcontainer from course network if needed"
 	@echo "  make ps             Show container status"
+	@echo "  make print-host-workspace  Show the host path docker compose will use for bind mounts"
 	@echo "  make logs SERVICE=<name>  Follow logs for one service"
 	@echo "  make reset-volumes  Remove containers and named volumes"
 	@echo "  make reset-all      Remove containers, volumes, and local images"
-	@echo "  make etl-bootstrap  Create/update ETL warehouse schema objects"
+	@echo "  make reset-l5       Rebuild only Lecture 5 warehouse schemas and keep Lecture 4 data"
+	@echo "  make etl-bootstrap  Ensure Lecture 4 advanced ETL warehouse schema objects exist"
+	@echo "  make etl-bootstrap-l5  Ensure Lecture 5 raw-layer warehouse objects exist"
 	@echo "  make etl-dry-run    Run ETL extraction + validation without database writes"
-	@echo "  make etl-backfill-2020-2025  Load Airviro data for 2020-2025"
-	@echo "  make etl-backfill-2020-today Load Airviro data from 2020-01-01 to today"
-	@echo "  make warehouse-status        Show warehouse health + completeness report"
+	@echo "  make etl-backfill-2020-2025  Load Lecture 4 Ohuseire data for station 8 + pollen 25"
+	@echo "  make etl-backfill-2020-today Load Lecture 4 Ohuseire data from 2020-01-01 to today"
+	@echo "  make warehouse-status        Show Lecture 4 warehouse health + completeness report"
 	@echo "  make warehouse-status-json   Same report in JSON format"
+	@echo "  make warehouse-status-l5     Show Lecture 5 warehouse health + completeness report"
+	@echo "  make pgduckdb-bootstrap      Enable pg_duckdb features on an existing database volume"
 	@echo "    Optional: STATUS_INDICATOR_LIMIT=500 STATUS_AUDIT_LIMIT=10"
 	@echo "    Optional: add VERBOSE=1 to ETL targets for progress logs"
 	@echo "  make dbt-debug      Validate dbt connection/profile in airflow-scheduler"
-	@echo "  make dbt-seed       Load dbt seeds (wind direction mapping)"
-	@echo "  make dbt-run        Build dbt models (staging + marts)"
+	@echo "  make dbt-seed       Load dbt seeds (station + wind direction dimensions)"
+	@echo "  make dbt-run        Build dbt models (staging + intermediate + marts)"
 	@echo "  make dbt-test       Run dbt data tests"
 	@echo "  make dbt-build      Run dbt seed + run + test"
+	@echo "  make dbt-docs       Generate dbt documentation artifacts in dbt/target"
+	@echo "  make dbt-docs-serve Generate dbt docs and start the optional dbt-docs service on http://127.0.0.1:$(DBT_DOCS_PORT)"
 	@echo "  make airflow-list-dags      List DAGs in airflow-scheduler"
 	@echo "  make airflow-list-runs DAG_ID=<dag_id>  List recent DAG runs"
-	@echo "  make airflow-unpause-dags   Unpause airviro_incremental and airviro_backfill"
-	@echo "  make airflow-pause-dags     Pause airviro_incremental and airviro_backfill"
-	@echo "  make airflow-trigger-incremental        Trigger airviro_incremental DAG"
-	@echo "  make airflow-trigger-backfill BACKFILL_START=YYYY-MM-DD [BACKFILL_END=YYYY-MM-DD] [BACKFILL_CHUNK_DAYS=31] [BACKFILL_SOURCE_KEYS=air_quality_station_19] [BACKFILL_ADVANCE_WATERMARK=true]"
+	@echo "  make airflow-unpause-dags   Unpause ohuseire_incremental and ohuseire_backfill"
+	@echo "  make airflow-pause-dags     Pause ohuseire_incremental and ohuseire_backfill"
+	@echo "  make airflow-trigger-incremental        Trigger ohuseire_incremental DAG"
+	@echo "  make airflow-trigger-backfill BACKFILL_START=YYYY-MM-DD [BACKFILL_END=YYYY-MM-DD] [BACKFILL_CHUNK_DAYS=31] [BACKFILL_SOURCE_KEYS=air_quality_station_4] [BACKFILL_ADVANCE_WATERMARK=true]"
 	@echo "  make devcontainer-join-course-network  Attach devcontainer to compose network"
+	@echo "  make devcontainer-leave-course-network Detach devcontainer from compose network"
 
 init:
 	@if [ ! -f "$(ENV_FILE)" ]; then cp .env.example "$(ENV_FILE)"; echo "Created $(ENV_FILE) from .env.example"; fi
@@ -71,7 +117,18 @@ init:
 	@mkdir -p airflow/dags
 
 check-host-workspace:
-	@if [ -z "$$HOST_WORKSPACE" ]; then echo "HOST_WORKSPACE is not set."; exit 1; fi
+	@$(RESOLVE_HOST_WORKSPACE) :
+
+print-host-workspace:
+	@$(RESOLVE_HOST_WORKSPACE) \
+	echo "Workspace path in devcontainer: $(WORKSPACE_DIR)"; \
+	echo "Requested HOST_WORKSPACE: $(HOST_WORKSPACE)"; \
+	if [ -n "$$inspected_path" ]; then \
+		echo "Detected host mount source via docker inspect: $$inspected_path"; \
+	else \
+		echo "Detected host mount source via docker inspect: unavailable"; \
+	fi; \
+	echo "Resolved HOST_WORKSPACE for docker compose: $$path"
 
 up-superset: init check-host-workspace
 	@$(COMPOSE) $(PROFILES_SUPERSET) up -d
@@ -83,38 +140,54 @@ up-all: init check-host-workspace
 	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) up -d
 
 down: check-host-workspace
-	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) down --remove-orphans
+	@$(MAKE) --no-print-directory devcontainer-leave-course-network
+	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) $(PROFILES_DBT_DOCS) down --remove-orphans
 
 ps: check-host-workspace
-	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) ps
+	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) $(PROFILES_DBT_DOCS) ps
 
 logs: check-host-workspace
 	@if [ -z "$(SERVICE)" ]; then echo "Usage: make logs SERVICE=<service-name>"; exit 1; fi
-	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) logs -f --tail=200 $(SERVICE)
+	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) $(PROFILES_DBT_DOCS) logs -f --tail=200 $(SERVICE)
 
 reset-volumes: check-host-workspace
-	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) down -v --remove-orphans
+	@$(MAKE) --no-print-directory devcontainer-leave-course-network
+	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) $(PROFILES_DBT_DOCS) down -v --remove-orphans
 
 reset-all: check-host-workspace
-	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) down -v --rmi local --remove-orphans
+	@$(MAKE) --no-print-directory devcontainer-leave-course-network
+	@$(COMPOSE) $(PROFILES_SUPERSET) $(PROFILES_AIRFLOW) $(PROFILES_DBT_DOCS) down -v --rmi local --remove-orphans
+
+reset-l5: up-airflow
+	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T postgres psql -U postgres -d warehouse -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS l5_mart CASCADE; DROP SCHEMA IF EXISTS l5_raw CASCADE;"
+	@$(MAKE) --no-print-directory etl-bootstrap-l5
 
 etl-bootstrap: init
 	@.venv/bin/python -m etl.airviro.cli bootstrap-db
 
+etl-bootstrap-l5: init
+	@$(LECTURE5_TABLE_ENV) OHUSEIRE_SCHEMA_SQL_PATH=sql/warehouse/l5_ohuseire_schema.sql OHUSEIRE_REFRESH_MART_DIMENSIONS=false .venv/bin/python -m etl.airviro.cli bootstrap-db
+
 etl-dry-run: init
-	@.venv/bin/python -m etl.airviro.cli run --from 2025-01-01 --to 2025-01-31 --dry-run $(ETL_VERBOSE_FLAG)
+	@.venv/bin/python -m etl.airviro.cli run --from 2026-03-10 --to 2026-03-12 $(LECTURE4_SOURCE_KEYS) --dry-run $(ETL_VERBOSE_FLAG)
 
 etl-backfill-2020-2025: init
-	@.venv/bin/python -m etl.airviro.cli run --from 2020-01-01 --to 2025-12-31 $(ETL_VERBOSE_FLAG)
+	@.venv/bin/python -m etl.airviro.cli run --from 2020-01-01 --to 2025-12-31 $(LECTURE4_SOURCE_KEYS) $(ETL_VERBOSE_FLAG)
 
 etl-backfill-2020-today: init
-	@.venv/bin/python -m etl.airviro.cli backfill --from 2020-01-01 $(ETL_VERBOSE_FLAG)
+	@.venv/bin/python -m etl.airviro.cli backfill --from 2020-01-01 $(LECTURE4_SOURCE_KEYS) $(ETL_VERBOSE_FLAG)
 
 warehouse-status: init
 	@.venv/bin/python -m etl.airviro.cli warehouse-status --indicator-limit $(STATUS_INDICATOR_LIMIT) --audit-limit $(STATUS_AUDIT_LIMIT)
 
 warehouse-status-json: init
 	@.venv/bin/python -m etl.airviro.cli warehouse-status --json --indicator-limit $(STATUS_INDICATOR_LIMIT) --audit-limit $(STATUS_AUDIT_LIMIT)
+
+warehouse-status-l5: init
+	@$(LECTURE5_TABLE_ENV) OHUSEIRE_REFRESH_MART_DIMENSIONS=false .venv/bin/python -m etl.airviro.cli warehouse-status --indicator-limit $(STATUS_INDICATOR_LIMIT) --audit-limit $(STATUS_AUDIT_LIMIT)
+
+pgduckdb-bootstrap: up-airflow
+	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T postgres bash /docker-entrypoint-initdb.d/02-enable-pgduckdb.sh
 
 devcontainer-join-course-network: init
 	@project_name="$$(grep -E '^COMPOSE_PROJECT_NAME=' "$(ENV_FILE)" | cut -d '=' -f2-)"; \
@@ -135,6 +208,25 @@ devcontainer-join-course-network: init
 		exit 1; \
 	fi
 
+devcontainer-leave-course-network:
+	@project_name="course"; \
+	if [ -f "$(ENV_FILE)" ]; then \
+		project_name="$$(grep -E '^COMPOSE_PROJECT_NAME=' "$(ENV_FILE)" | cut -d '=' -f2-)"; \
+	fi; \
+	if [ -z "$$project_name" ]; then project_name="course"; fi; \
+	network_name="$${project_name}_default"; \
+	container_id="$$(hostname)"; \
+	if ! sudo docker network inspect "$$network_name" >/dev/null 2>&1; then \
+		echo "Compose network '$$network_name' is not present."; \
+	elif disconnect_output="$$(sudo docker network disconnect "$$network_name" "$$container_id" 2>&1)"; then \
+		echo "Disconnected devcontainer '$$container_id' from '$$network_name'."; \
+	elif echo "$$disconnect_output" | grep -qi 'not connected'; then \
+		echo "Devcontainer '$$container_id' is not attached to '$$network_name'."; \
+	else \
+		echo "$$disconnect_output"; \
+		exit 1; \
+	fi
+
 dbt-debug: up-airflow
 	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler bash -lc "cd $(DBT_PROJECT_DIR) && dbt debug --project-dir . --profiles-dir ."
 
@@ -150,6 +242,13 @@ dbt-test: up-airflow
 dbt-build: up-airflow
 	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler bash -lc "cd $(DBT_PROJECT_DIR) && dbt seed --project-dir . --profiles-dir . && dbt run --project-dir . --profiles-dir . && dbt test --project-dir . --profiles-dir ."
 
+dbt-docs: up-airflow
+	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler bash -lc "cd $(DBT_PROJECT_DIR) && dbt docs generate --project-dir . --profiles-dir ."
+
+dbt-docs-serve: dbt-docs check-host-workspace
+	@$(COMPOSE) $(PROFILES_DBT_DOCS) up -d dbt-docs
+	@echo "dbt docs available at http://127.0.0.1:$(DBT_DOCS_PORT)"
+
 airflow-list-dags: up-airflow
 	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags list
 
@@ -157,17 +256,17 @@ airflow-list-runs: up-airflow
 	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags list-runs $(DAG_ID)
 
 airflow-trigger-incremental: up-airflow
-	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags trigger airviro_incremental
+	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags trigger ohuseire_incremental
 
 airflow-trigger-backfill: up-airflow
 	@conf="{\"start_date\":\"$(BACKFILL_START)\",\"end_date\":\"$(BACKFILL_END)\",\"chunk_days\":$(BACKFILL_CHUNK_DAYS),\"source_keys\":\"$(BACKFILL_SOURCE_KEYS)\",\"advance_watermark\":$(BACKFILL_ADVANCE_WATERMARK)}"; \
 	echo "Trigger conf: $$conf"; \
-	$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags trigger airviro_backfill --conf "$$conf"
+	$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags trigger ohuseire_backfill --conf "$$conf"
 
 airflow-unpause-dags: up-airflow
-	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags unpause -y airviro_incremental
-	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags unpause -y airviro_backfill
+	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags unpause -y ohuseire_incremental
+	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags unpause -y ohuseire_backfill
 
 airflow-pause-dags: up-airflow
-	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags pause -y airviro_incremental
-	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags pause -y airviro_backfill
+	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags pause -y ohuseire_incremental
+	@$(COMPOSE) $(PROFILES_AIRFLOW) exec -T airflow-scheduler airflow dags pause -y ohuseire_backfill

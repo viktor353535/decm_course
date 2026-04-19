@@ -1,4 +1,4 @@
-"""CLI entry points for the Airviro ETL pipeline."""
+"""CLI entry points for the Ohuseire ETL pipeline."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import asdict
 from datetime import date, datetime, time
 from pathlib import Path
 import json
+import os
 import sys
 import uuid
 
@@ -31,7 +32,17 @@ from .pipeline import (
 )
 
 
-SCHEMA_SQL_PATH = Path("sql/warehouse/airviro_schema.sql")
+DEFAULT_SCHEMA_SQL_PATH = "sql/warehouse/l4_airviro_schema.sql"
+
+
+def default_schema_sql_path() -> str:
+    """Return the default bootstrap SQL path from env or the legacy Lecture 4 path."""
+
+    return (
+        os.getenv("OHUSEIRE_SCHEMA_SQL_PATH")
+        or os.getenv("AIRVIRO_SCHEMA_SQL_PATH")
+        or DEFAULT_SCHEMA_SQL_PATH
+    ).strip() or DEFAULT_SCHEMA_SQL_PATH
 
 
 def parse_source_keys(raw_values: list[str] | None) -> list[str]:
@@ -72,12 +83,15 @@ def build_progress_logger(verbose: bool) -> ProgressCallback | None:
         source_label = f"{source_key}/{source_type}"
 
         if event_name == "source_start":
+            padding_suffix = ""
+            if int(event.get("request_padding_days", 0)):
+                padding_suffix = f", request_padding_days={event['request_padding_days']}"
             print(
                 (
                     f"[{source_label}] extracting {event['from_date']}..{event['to_date']} "
                     f"(station={event['source_station_id']}, "
                     f"max_window_days={event['max_window_days']}, "
-                    f"top_level_windows={event['top_level_window_count']})"
+                    f"top_level_windows={event['top_level_window_count']}{padding_suffix})"
                 ),
                 file=sys.stderr,
                 flush=True,
@@ -85,10 +99,18 @@ def build_progress_logger(verbose: bool) -> ProgressCallback | None:
             return
 
         if event_name == "top_level_window_start":
+            fetch_suffix = ""
+            if (
+                event.get("fetch_window_start") != event.get("window_start")
+                or event.get("fetch_window_end") != event.get("window_end")
+            ):
+                fetch_suffix = (
+                    f" (fetch {event['fetch_window_start']}..{event['fetch_window_end']})"
+                )
             print(
                 (
                     f"[{source_label}] window {event['window_index']}/{event['window_count']} "
-                    f"{event['window_start']}..{event['window_end']}"
+                    f"{event['window_start']}..{event['window_end']}{fetch_suffix}"
                 ),
                 file=sys.stderr,
                 flush=True,
@@ -101,7 +123,11 @@ def build_progress_logger(verbose: bool) -> ProgressCallback | None:
                     f"[{source_label}] window {event['window_index']}/{event['window_count']} done: "
                     f"rows={event['rows_read_window']} records={event['records_normalized_window']} "
                     f"duplicates={event['duplicates_window']} "
+                    f"trimmed_outside_fetch={event['trimmed_out_of_window_window']} "
+                    f"padding_trimmed={event['trimmed_from_padding_window']} "
                     f"(totals rows={event['rows_read_total']} records={event['records_normalized_total']} "
+                    f"trimmed_outside_fetch={event['trimmed_out_of_window_total']} "
+                    f"padding_trimmed={event['trimmed_from_padding_total']} "
                     f"windows_requested={event['windows_requested_total']} splits={event['split_events_total']})"
                 ),
                 file=sys.stderr,
@@ -146,11 +172,29 @@ def build_progress_logger(verbose: bool) -> ProgressCallback | None:
             )
             return
 
+        if event_name == "window_guard":
+            print(
+                f"[{source_label}] warning: {event['warning']}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+
+        if event_name == "coverage_warning":
+            print(
+                f"[{source_label}] warning: {event['warning']}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+
         if event_name == "source_complete":
             print(
                 (
                     f"[{source_label}] extraction complete: rows={event['rows_read_total']} "
                     f"records={event['records_normalized_total']} duplicates={event['duplicates_total']} "
+                    f"trimmed_outside_fetch={event['trimmed_out_of_window_total']} "
+                    f"padding_trimmed={event['trimmed_from_padding_total']} "
                     f"windows_requested={event['windows_requested_total']} "
                     f"splits={event['split_events_total']}"
                 ),
@@ -215,17 +259,23 @@ def render_warehouse_status(
     lines: list[str] = []
     database = status.get("database", {})
     table_status = status.get("table_status", {})
+    raw_schema = format_scalar(status.get("raw_schema"))
+    mart_schema = format_scalar(status.get("mart_schema"))
+    measurement_table_name = format_scalar(status.get("measurement_table_name"))
+    ingestion_audit_table_name = format_scalar(status.get("ingestion_audit_table_name"))
 
     lines.append("Warehouse Status")
     lines.append(f"host: {format_scalar(status.get('database_host'))}")
     lines.append(f"database: {format_scalar(database.get('database_name'))}")
     lines.append(f"user: {format_scalar(database.get('database_user'))}")
+    lines.append(f"raw_schema: {raw_schema}")
+    lines.append(f"mart_schema: {mart_schema}")
     lines.append(f"collected_at_utc: {format_scalar(database.get('collected_at_utc'))}")
     lines.append(
         "tables: "
-        f"raw.airviro_measurement={format_scalar(table_status.get('has_measurement_table'))}, "
-        f"raw.airviro_ingestion_audit={format_scalar(table_status.get('has_ingestion_audit_table'))}, "
-        f"raw.pipeline_watermark={format_scalar(table_status.get('has_pipeline_watermark_table'))}"
+        f"{raw_schema}.{measurement_table_name}={format_scalar(table_status.get('has_measurement_table'))}, "
+        f"{raw_schema}.{ingestion_audit_table_name}={format_scalar(table_status.get('has_ingestion_audit_table'))}, "
+        f"{raw_schema}.pipeline_watermark={format_scalar(table_status.get('has_pipeline_watermark_table'))}"
     )
 
     warning = status.get("warning")
@@ -274,7 +324,7 @@ def render_warehouse_status(
             )
         )
     else:
-        lines.append("No rows found in raw.airviro_measurement.")
+        lines.append(f"No rows found in {raw_schema}.{measurement_table_name}.")
 
     indicator_rows = status.get("indicator_completeness", [])
     lines.append("")
@@ -386,11 +436,11 @@ def build_parser() -> ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     bootstrap_parser = subparsers.add_parser(
-        "bootstrap-db", help="Create/update warehouse schema objects"
+        "bootstrap-db", help="Ensure warehouse schema objects exist"
     )
     bootstrap_parser.add_argument(
         "--schema-sql",
-        default=str(SCHEMA_SQL_PATH),
+        default=default_schema_sql_path(),
         help="Path to schema SQL file",
     )
 
@@ -406,7 +456,7 @@ def build_parser() -> ArgumentParser:
     )
     run_parser.add_argument(
         "--schema-sql",
-        default=str(SCHEMA_SQL_PATH),
+        default=default_schema_sql_path(),
         help="Path to schema SQL file",
     )
     run_parser.add_argument(
@@ -437,7 +487,7 @@ def build_parser() -> ArgumentParser:
     )
     backfill_parser.add_argument(
         "--schema-sql",
-        default=str(SCHEMA_SQL_PATH),
+        default=default_schema_sql_path(),
         help="Path to schema SQL file",
     )
     backfill_parser.add_argument(
@@ -493,14 +543,13 @@ def run_pipeline(
     batch_id = str(uuid.uuid4())
     summaries: list[SourceRunSummary] = []
 
-    sources = get_source_configs(settings)
-    if source_keys:
-        selected_keys = set(source_keys)
+    selected_keys = set(source_keys) if source_keys else None
+    sources = get_source_configs(settings, requested_source_keys=selected_keys)
+    if selected_keys is not None:
         source_map = {source.source_key: source for source in sources}
         unknown = sorted(selected_keys - set(source_map))
         if unknown:
             raise ValueError(f"Unknown --source-key values: {', '.join(unknown)}")
-        sources = [source for source in sources if source.source_key in selected_keys]
 
     connection = None
     selected_host = None
@@ -508,7 +557,7 @@ def run_pipeline(
         connection, selected_host = connect_warehouse(settings)
         log_verbose(verbose, f"[db] connected to warehouse host '{selected_host}'")
         log_verbose(verbose, f"[db] ensuring schema from '{schema_sql}'")
-        apply_schema(connection, schema_sql)
+        apply_schema(connection, schema_sql, settings)
 
     progress_logger = build_progress_logger(verbose)
 
@@ -533,7 +582,9 @@ def run_pipeline(
                 verbose,
                 (
                     f"[{source.source_key}] normalized records={len(records)} "
-                    f"rows_read={summary.rows_read} duplicates={summary.duplicate_measurements}"
+                    f"rows_read={summary.rows_read} duplicates={summary.duplicate_measurements} "
+                    f"trimmed_outside_fetch={summary.trimmed_out_of_window} "
+                    f"trimmed_from_padding={summary.trimmed_from_padding}"
                 ),
             )
 
@@ -551,6 +602,9 @@ def run_pipeline(
                             "indicator_counts": indicator_counts,
                             "split_events": summary.split_events,
                             "duplicate_measurements": summary.duplicate_measurements,
+                            "warnings": summary.warnings,
+                            "trimmed_out_of_window": summary.trimmed_out_of_window,
+                            "trimmed_from_padding": summary.trimmed_from_padding,
                         },
                         indent=2,
                     )
@@ -559,11 +613,12 @@ def run_pipeline(
 
             assert connection is not None
             log_verbose(verbose, f"[{source.source_key}] upserting {len(records)} records")
-            loaded_count = upsert_measurements(connection, records)
+            loaded_count = upsert_measurements(connection, records, settings)
             summary.measurements_upserted = loaded_count
             log_verbose(verbose, f"[{source.source_key}] upserted {loaded_count} records")
             log_ingestion_audit(
                 connection,
+                settings,
                 batch_id=batch_id,
                 source_key=source.source_key,
                 source_type=source.source_type,
@@ -575,14 +630,20 @@ def run_pipeline(
                 duplicate_records=summary.duplicate_measurements,
                 split_events=summary.split_events,
                 status="success",
-                message=None,
+                message=" | ".join(summary.warnings)[:500] if summary.warnings else None,
             )
 
         if not dry_run:
             assert connection is not None
-            log_verbose(verbose, "[db] refreshing mart dimensions")
-            refresh_dimensions(connection)
-            log_verbose(verbose, "[db] dimension refresh complete")
+            if settings.airviro_refresh_mart_dimensions:
+                log_verbose(verbose, "[db] refreshing legacy mart dimensions")
+                refresh_dimensions(connection, settings)
+                log_verbose(verbose, "[db] dimension refresh complete")
+            else:
+                log_verbose(
+                    verbose,
+                    "[db] skipping legacy mart dimension refresh (handled by dbt for this schema)",
+                )
 
     except Exception as exc:
         if not dry_run and connection is not None:
@@ -592,6 +653,7 @@ def run_pipeline(
                 try:
                     log_ingestion_audit(
                         connection,
+                        settings,
                         batch_id=batch_id,
                         source_key=summary.source_key,
                         source_type=summary.source_type,
@@ -621,6 +683,8 @@ def run_pipeline(
         "to_date": end_date.isoformat(),
         "dry_run": dry_run,
         "database_host": selected_host,
+        "raw_schema": settings.airviro_raw_schema,
+        "mart_schema": settings.airviro_mart_schema,
         "source_keys": [source.source_key for source in sources],
         "sources": [asdict(item) for item in summaries],
     }
@@ -636,7 +700,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "bootstrap-db":
             connection, selected_host = connect_warehouse(settings)
             try:
-                apply_schema(connection, Path(args.schema_sql))
+                apply_schema(connection, Path(args.schema_sql), settings)
             finally:
                 connection.close()
             print(f"Warehouse schema ensured on host '{selected_host}'.")
@@ -647,6 +711,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 status = collect_warehouse_status(
                     connection,
+                    settings,
                     indicator_limit=args.indicator_limit,
                     audit_limit=args.audit_limit,
                 )

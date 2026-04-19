@@ -50,22 +50,39 @@ make devcontainer-join-course-network
 Note: keep Airflow stopped during Lecture 4 to avoid background orchestration side effects.
 Airflow is started in Lecture 5.
 
-Core ETL flow:
+Simple ETL tutorial example:
+
+```bash
+.venv/bin/python etl/lecture4_simple_air_quality.py --from 2026-03-10 --to 2026-03-12 --load-mode replace
+```
+
+Advanced Lecture 4 ETL flow:
 
 ```bash
 make etl-bootstrap
-make etl-backfill-2020-2025
+.venv/bin/python -m etl.airviro.cli run --from 2026-03-10 --to 2026-03-12 --source-key air_quality_station_8 --source-key pollen_station_25 --verbose
 make warehouse-status
 ```
 
-Optional verbose run:
+Optional larger historical load:
 
 ```bash
 make etl-backfill-2020-2025 VERBOSE=1
 ```
 
+Note: as of 2026-03-27, the live Ohuseire historical API around late October 2025 has mixed timestamp behavior. The advanced Lecture 4 CLI ETL now skips `2025-10-26` automatically for `air_quality_station_8` and warns when a requested range crosses that day. Recheck the caution note in `docs/lectures/lecture-04/README.md` before loading larger historical windows.
+
+Lecture 4 warehouse relations:
+- `l4_simple.air_quality_station_8_hourly`
+- `l4_mart.v_air_quality_hourly_station_8`
+- `l4_mart.v_pollen_daily_station_25`
+- `l4_mart.v_airviro_measurements_long`
+
 Superset SQL helper snippets:
 - `superset/snippets.md`
+
+Shared source reference:
+- `docs/reference/ohuseire-api.md`
 
 ## 3) Continue With Lecture 5 (Airflow + dbt)
 
@@ -79,15 +96,37 @@ Core commands:
 
 ```bash
 make up-airflow
+make etl-bootstrap-l5
 make dbt-build
 make airflow-unpause-dags
 make airflow-trigger-incremental
 ```
 
+Lecture 5 uses separate schemas so we can compare the raw ETL design from Lecture 4 with the dimensional warehouse design from Lecture 5:
+- `l5_raw.ohuseire_measurement`
+- `l5_raw.pipeline_watermark`
+- `l5_mart.dim_station`
+- `l5_mart.dim_date`
+- `l5_mart.dim_time_hour`
+- `l5_mart.fct_air_quality_hourly`
+- `l5_mart.fct_pollen_daily`
+- `l5_mart.v_air_quality_hourly`
+- `l5_mart.v_pollen_daily`
+- `l5_mart.v_ohuseire_measurements_long`
+
+Current stack note:
+- Airflow and Superset are both built locally from slim Debian images with pinned `uv` lock files.
+- Airflow and dbt share one custom image for low-friction local use.
+- dbt is installed into its own `/opt/dbt-venv` inside that image so its Python dependencies stay isolated from Airflow.
+- The shared database now defaults to `pgduckdb`, which keeps PostgreSQL compatibility while allowing optional DuckDB file queries from the same warehouse.
+
 Open Airflow:
 - URL: <http://localhost:8080>
 - username: `airflow`
 - password: `airflow`
+
+Open dbt docs after `make dbt-docs-serve`:
+- URL: <http://localhost:8081>
 
 ## Stack Lifecycle (Quick Reference)
 
@@ -116,13 +155,18 @@ make reset-volumes
 make reset-all
 ```
 
+These lifecycle targets detach the devcontainer from the course Compose network before teardown so Docker can remove the project network cleanly.
+
 ## Environment Notes
 
 - Work from inside the devcontainer.
 - Host requirements: VS Code, Docker, Git.
 - `.env` is local-only and ignored by git.
 - `.env.example` is the template used by `make init`.
-- Docker runs through the mounted host socket, so bind mount paths must be valid on the host.
+- Prefer the `make up-*` targets over raw `docker compose up` inside the devcontainer.
+- Docker runs through the mounted host socket, so the Makefile resolves bind mount paths against the host daemon.
+- Run `make print-host-workspace` to inspect the requested and resolved workspace paths when debugging bind mounts.
+- `warehouse/files/` is bind-mounted into the database and Airflow containers for optional DuckDB file access experiments.
 
 ## Lecture Index
 

@@ -1,4 +1,4 @@
-"""Incremental Airviro pipeline DAG with watermark-based progress tracking."""
+"""Incremental Ohuseire pipeline DAG with watermark-based progress tracking."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.sdk import dag, task
 import pendulum
 
-import airviro_dag_utils as utils
+import ohuseire_dag_utils as utils
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -18,15 +18,15 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 @dag(
-    dag_id="airviro_incremental",
-    description="Incremental ETL + dbt orchestration with date watermark state.",
+    dag_id="ohuseire_incremental",
+    description="Incremental Ohuseire ETL + dbt orchestration with date watermark state.",
     schedule="15 * * * *",
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
     max_active_runs=1,
-    tags=["course", "airviro", "etl", "dbt", "incremental"],
+    tags=["course", "ohuseire", "etl", "dbt", "incremental"],
 )
-def airviro_incremental() -> None:
+def ohuseire_incremental() -> None:
     @task(task_id="ensure_prerequisites")
     def ensure_prerequisites() -> None:
         # Keep this idempotent so students can recover by re-running the DAG.
@@ -36,21 +36,36 @@ def airviro_incremental() -> None:
     @task(task_id="plan_incremental_windows")
     def plan_incremental_windows() -> dict[str, object]:
         bootstrap_start = utils.parse_iso_date(
-            os.getenv("AIRFLOW_AIRVIRO_INCREMENTAL_BOOTSTRAP_START", "2020-01-01")
+            os.getenv(
+                "AIRFLOW_OHUSEIRE_INCREMENTAL_BOOTSTRAP_START",
+                os.getenv("AIRFLOW_AIRVIRO_INCREMENTAL_BOOTSTRAP_START", "2020-01-01"),
+            )
         )
-        max_days_per_run = int(os.getenv("AIRFLOW_AIRVIRO_INCREMENTAL_MAX_DAYS", "31"))
+        max_days_per_run = int(
+            os.getenv(
+                "AIRFLOW_OHUSEIRE_INCREMENTAL_MAX_DAYS",
+                os.getenv("AIRFLOW_AIRVIRO_INCREMENTAL_MAX_DAYS", "31"),
+            )
+        )
         if max_days_per_run < 1:
-            raise ValueError("AIRFLOW_AIRVIRO_INCREMENTAL_MAX_DAYS must be >= 1")
+            raise ValueError("AIRFLOW_OHUSEIRE_INCREMENTAL_MAX_DAYS must be >= 1")
 
         today = utils.utc_today()
         closed_day = today - timedelta(days=1)
-        legacy_global_watermark = utils.get_watermark(utils.PIPELINE_NAME_INCREMENTAL)
+        legacy_global_watermark = utils.get_watermark_with_fallback(
+            utils.PIPELINE_NAME_INCREMENTAL,
+            utils.LEGACY_PIPELINE_NAME_INCREMENTAL,
+        )
 
         source_windows: list[dict[str, object]] = []
         for source in utils.get_configured_sources():
             source_key = str(source["source_key"])
             watermark_key = utils.incremental_source_watermark_key(source_key)
-            watermark = utils.get_watermark(watermark_key)
+            legacy_watermark_key = utils.incremental_source_watermark_key(
+                source_key,
+                pipeline_name=utils.LEGACY_PIPELINE_NAME_INCREMENTAL,
+            )
+            watermark = utils.get_watermark_with_fallback(watermark_key, legacy_watermark_key)
 
             if watermark is None:
                 if legacy_global_watermark is not None:
@@ -126,7 +141,10 @@ def airviro_incremental() -> None:
 
     @task(task_id="run_etl_windows")
     def run_etl_windows(plan: dict[str, object]) -> None:
-        verbose = _env_bool("AIRFLOW_AIRVIRO_INCREMENTAL_VERBOSE", False)
+        verbose = _env_bool(
+            "AIRFLOW_OHUSEIRE_INCREMENTAL_VERBOSE",
+            _env_bool("AIRFLOW_AIRVIRO_INCREMENTAL_VERBOSE", False),
+        )
         source_windows: list[dict[str, object]] = list(plan["source_windows"])  # type: ignore[arg-type]
         for window in source_windows:
             if not bool(window["has_work"]):
@@ -135,7 +153,7 @@ def airviro_incremental() -> None:
             start_date = utils.parse_iso_date(str(window["from_date"]))
             end_date = utils.parse_iso_date(str(window["to_date"]))
             print(
-                f"[airviro] incremental source window "
+                f"[ohuseire] incremental source window "
                 f"{source_key}: {start_date.isoformat()}..{end_date.isoformat()}"
             )
             utils.run_etl_range(start_date, end_date, verbose=verbose, source_key=source_key)
@@ -154,14 +172,14 @@ def airviro_incremental() -> None:
             watermark_target_date = utils.parse_iso_date(str(window["watermark_target_date"]))
             utils.set_watermark(watermark_key, watermark_target_date)
             print(
-                f"[airviro] advanced watermark '{watermark_key}' "
+                f"[ohuseire] advanced watermark '{watermark_key}' "
                 f"to {watermark_target_date.isoformat()}"
             )
 
     @task(task_id="no_work")
     def no_work(plan: dict[str, object]) -> None:
         print(
-            "[airviro] no incremental work window "
+            "[ohuseire] no incremental work window "
             f"(source_window_count={plan['source_window_count']}, "
             f"work_window_count={plan['work_window_count']})"
         )
@@ -182,4 +200,4 @@ def airviro_incremental() -> None:
     branch >> no_work_task >> done
 
 
-airviro_incremental()
+ohuseire_incremental()

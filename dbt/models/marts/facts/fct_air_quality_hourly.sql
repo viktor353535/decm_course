@@ -1,0 +1,33 @@
+{{ config(materialized='table') }}
+
+select
+  station_key,
+  indicator_key,
+  date_key,
+  hour_key,
+  hour_occurrence_in_day,
+  slot_sequence_in_day,
+  source_type,
+  station_id,
+  observed_date,
+  observed_at,
+  observed_at_local,
+  observed_clock_hour,
+  source_timezone_name,
+  indicator_code,
+  value_numeric,
+  source_row_hash,
+  extracted_at,
+  is_spring_forward_day,
+  is_autumn_fallback_day,
+  is_expected_dst_transition_day,
+  measurements_in_day,
+  distinct_clock_hours_in_day,
+  expected_measurements_in_day,
+  expected_distinct_clock_hours_in_day,
+  is_complete_day_series,
+  has_repeated_clock_hour,
+  has_missing_clock_hour,
+  has_repeated_or_skipped_clock_hour,
+  has_unexpected_clock_pattern
+from {{ ref('int_air_quality_measurement') }}

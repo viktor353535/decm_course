@@ -1,0 +1,4 @@
+station_key,source_type,station_id,station_name,city_name,station_type,airviro_code,is_default_course_station
+air_quality:4,air_quality,4,Narva,Narva,URBAN,S25,true
+air_quality:8,air_quality,8,Tartu,Tartu,URBAN,S21,true
+pollen:25,pollen,25,Tartu,Tartu,POLLEN,P04,true

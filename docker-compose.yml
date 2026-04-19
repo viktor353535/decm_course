@@ -1,33 +1,67 @@
-# Combined local stack for course use.
+# Local teaching stack for lectures 3-5.
 # Profiles:
 # - superset
 # - airflow
 
-x-superset-image: &superset-image ${SUPERSET_IMAGE}
-x-superset-volumes: &superset-volumes
-  - superset-home:/app/superset_home
+x-ohuseire-lecture5-env: &ohuseire-lecture5-env
+  OHUSEIRE_AIR_STATION_IDS: 4,8
+  OHUSEIRE_POLLEN_STATION_IDS: 25
+  OHUSEIRE_RAW_SCHEMA: l5_raw
+  OHUSEIRE_MART_SCHEMA: l5_mart
+  OHUSEIRE_MEASUREMENT_TABLE: ohuseire_measurement
+  OHUSEIRE_INGESTION_AUDIT_TABLE: ohuseire_ingestion_audit
+  OHUSEIRE_SCHEMA_SQL_PATH: /opt/airflow/sql/warehouse/l5_ohuseire_schema.sql
+  OHUSEIRE_REFRESH_MART_DIMENSIONS: "false"
+  DBT_SOURCE_RAW_SCHEMA: l5_raw
+  DBT_TARGET_SCHEMA: l5_mart
+
+x-superset-common: &superset-common
+  image: course-superset-local
+  pull_policy: never
+  build:
+    context: ./superset/image
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  environment: &superset-common-env
+    SUPERSET_DB_HOST: postgres
+    SUPERSET_DB_PORT: "5432"
+  volumes: &superset-volumes
+    - superset-home:/app/superset_home
+    - type: bind
+      source: ${HOST_WORKSPACE}/warehouse/files
+      target: /warehouse-files
+      bind:
+        create_host_path: true
+  depends_on:
+    postgres:
+      condition: service_healthy
+  user: "0:0"
 
 x-airflow-common: &airflow-common
-  image: ${AIRFLOW_CUSTOM_IMAGE_NAME:-course-airflow:3.1.7-dbt}
+  image: course-airflow-local
   pull_policy: never
   build:
     context: ./airflow/image
     dockerfile: Dockerfile
     args:
-      AIRFLOW_BASE_IMAGE: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.1.7}
+      AIRFLOW_UID: ${AIRFLOW_UID}
   env_file:
     - .env
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${AIRFLOW_DB_NAME}
-    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
-    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: ${AIRFLOW_DAGS_PAUSED_AT_CREATION}
-    AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW_LOAD_EXAMPLES}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@postgres:5432/${AIRFLOW_DB_NAME}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
+    AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
-    AIRFLOW_CONFIG: /opt/airflow/config/airflow.cfg
-    _PIP_ADDITIONAL_REQUIREMENTS: ""
+    WAREHOUSE_DB_HOST: postgres
+    WAREHOUSE_DB_PORT: "5432"
+    <<: *ohuseire-lecture5-env
   volumes:
     - type: bind
       source: ${HOST_WORKSPACE}/airflow/dags
@@ -51,9 +85,12 @@ x-airflow-common: &airflow-common
       read_only: true
       bind:
         create_host_path: true
+    - type: bind
+      source: ${HOST_WORKSPACE}/warehouse/files
+      target: /opt/airflow/warehouse-files
+      bind:
+        create_host_path: true
     - airflow-logs:/opt/airflow/logs
-    - airflow-config:/opt/airflow/config
-    - airflow-plugins:/opt/airflow/plugins
   user: "${AIRFLOW_UID}:0"
   depends_on: &airflow-common-depends-on
     postgres:
@@ -64,7 +101,7 @@ services:
     profiles:
       - superset
       - airflow
-    image: ${POSTGRES_IMAGE}
+    image: pgduckdb/pgduckdb:16-v1.1.1
     env_file:
       - .env
     environment:
@@ -79,6 +116,11 @@ services:
         source: ${HOST_WORKSPACE}/postgres/init
         target: /docker-entrypoint-initdb.d
         read_only: true
+      - type: bind
+        source: ${HOST_WORKSPACE}/warehouse/files
+        target: /warehouse-files
+        bind:
+          create_host_path: true
     healthcheck:
       test:
         - CMD-SHELL
@@ -89,75 +131,24 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  superset-redis:
-    profiles:
-      - superset
-    image: redis:7.2-bookworm
-    volumes:
-      - superset-redis-data:/data
-    healthcheck:
-      test:
-        - CMD
-        - redis-cli
-        - ping
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-    restart: unless-stopped
-
   superset-init:
+    <<: *superset-common
     profiles:
       - superset
-    image: *superset-image
-    env_file:
-      - .env
-    environment:
-      DATABASE_DIALECT: ${SUPERSET_DB_DIALECT}
-      DATABASE_HOST: ${POSTGRES_HOST}
-      DATABASE_PORT: ${POSTGRES_PORT}
-      DATABASE_DB: ${SUPERSET_DB_NAME}
-      DATABASE_USER: ${SUPERSET_DB_USER}
-      DATABASE_PASSWORD: ${SUPERSET_DB_PASSWORD}
-      REDIS_HOST: ${REDIS_HOST}
-      REDIS_PORT: ${REDIS_PORT}
-    command:
-      - /app/docker/docker-init.sh
-    depends_on:
-      postgres:
-        condition: service_healthy
-      superset-redis:
-        condition: service_healthy
-    user: "root"
-    volumes: *superset-volumes
+    command: bootstrap
     healthcheck:
       disable: true
 
   superset:
+    <<: *superset-common
     profiles:
       - superset
-    image: *superset-image
-    env_file:
-      - .env
-    environment:
-      DATABASE_DIALECT: ${SUPERSET_DB_DIALECT}
-      DATABASE_HOST: ${POSTGRES_HOST}
-      DATABASE_PORT: ${POSTGRES_PORT}
-      DATABASE_DB: ${SUPERSET_DB_NAME}
-      DATABASE_USER: ${SUPERSET_DB_USER}
-      DATABASE_PASSWORD: ${SUPERSET_DB_PASSWORD}
-      REDIS_HOST: ${REDIS_HOST}
-      REDIS_PORT: ${REDIS_PORT}
-    command:
-      - /app/docker/docker-bootstrap.sh
-      - app-gunicorn
+    command: run-server
     ports:
       - ${SUPERSET_PORT}:8088
     depends_on:
       superset-init:
         condition: service_completed_successfully
-    volumes: *superset-volumes
-    user: "root"
     restart: unless-stopped
     healthcheck:
       test:
@@ -178,8 +169,8 @@ services:
     command:
       - -c
       - |
-        mkdir -p /opt/airflow/{logs,dags,plugins,config}
-        chown -R "${AIRFLOW_UID}:0" /opt/airflow/{logs,dags,plugins,config}
+        mkdir -p /opt/airflow/logs
+        chown -R "${AIRFLOW_UID}:0" /opt/airflow/logs
         exec /entrypoint airflow version
     environment:
       <<: *airflow-common-env
@@ -190,7 +181,6 @@ services:
       _AIRFLOW_WWW_USER_FIRSTNAME: Airflow
       _AIRFLOW_WWW_USER_LASTNAME: Admin
       _AIRFLOW_WWW_USER_EMAIL: ${AIRFLOW_ADMIN_EMAIL}
-      _PIP_ADDITIONAL_REQUIREMENTS: ""
     user: "0:0"
 
   airflow-apiserver:
@@ -275,10 +265,36 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  dbt-docs:
+    <<: *airflow-common
+    profiles:
+      - dbt-docs
+    depends_on: []
+    command:
+      - bash
+      - -lc
+      - |
+        if [ ! -f /opt/airflow/dbt/target/index.html ]; then
+          echo "dbt docs artifacts are missing. Run 'make dbt-docs' first." >&2
+          exit 1
+        fi
+        cd /opt/airflow/dbt
+        exec dbt docs serve --project-dir . --profiles-dir . --port 8081 --host 0.0.0.0 --no-browser
+    ports:
+      - ${DBT_DOCS_PORT:-8081}:8081
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - http://localhost:8081/index.html
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   superset-home:
-  superset-redis-data:
   postgres-data:
   airflow-logs:
-  airflow-config:
-  airflow-plugins:

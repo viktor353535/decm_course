@@ -1,6 +1,6 @@
 # Lecture Materials
 
-This folder contains student-facing lecture/tutorial materials for the course.
+This folder contains the lecture and tutorial materials for the course.
 
 ## Lecture Sequence
 
@@ -12,3 +12,7 @@ This folder contains student-facing lecture/tutorial materials for the course.
 5. Lecture 5: Airflow + dbt orchestration and pipeline evolution
    - [Lecture 5 Overview](./lecture-05/README.md)
    - [Lecture 5 Operations Notes](./lecture-05/operations.md)
+
+## Shared References
+
+- [Ohuseire API Reference](../reference/ohuseire-api.md)

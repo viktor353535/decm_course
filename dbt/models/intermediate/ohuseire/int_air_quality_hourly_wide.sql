@@ -1,9 +1,20 @@
 {{ config(materialized='view') }}
 
-with air_quality as (
+with grouped as (
   select
+    station_key,
     station_id,
-    observed_at,
+    observed_date,
+    date_key,
+    hour_key,
+    hour_occurrence_in_day,
+    min(observed_at) as slot_first_observed_at,
+    max(observed_at) as slot_last_observed_at,
+    bool_and(is_complete_day_series) as all_loaded_indicators_have_complete_day_series,
+    bool_or(has_repeated_or_skipped_clock_hour) as any_indicator_has_clock_anomaly,
+    bool_or(has_unexpected_clock_pattern) as any_indicator_has_unexpected_clock_pattern,
+    bool_or(is_expected_dst_transition_day) as is_expected_dst_transition_day,
+    count(*) as indicators_present_in_slot,
     max(value_numeric) filter (where indicator_code = 'so2') as so2,
     max(value_numeric) filter (where indicator_code = 'no2') as no2,
     max(value_numeric) filter (where indicator_code = 'co') as co,
@@ -17,42 +28,13 @@ with air_quality as (
     max(value_numeric) filter (where indicator_code = 'rad') as rad,
     max(value_numeric) filter (where indicator_code = 'wd10') as wd10,
     max(value_numeric) filter (where indicator_code = 'ws10') as ws10
-  from {{ ref('stg_airviro_measurement') }}
-  where source_type = 'air_quality'
-  group by station_id, observed_at
+  from {{ ref('int_air_quality_measurement') }}
+  group by station_key, station_id, observed_date, date_key, hour_key, hour_occurrence_in_day
 )
 select
-  aq.station_id,
-  aq.observed_at,
-  dt.date_value,
-  dt.year_number,
-  dt.month_number,
-  dt.month_name,
-  dt.day_number,
-  dt.day_name,
-  dt.day_of_week_number,
-  dt.hour_number,
-  aq.so2,
-  aq.no2,
-  aq.co,
-  aq.o3,
-  aq.pm10,
-  aq.pm2_5,
-  aq.temp,
-  aq.wd10,
-  aq.ws10,
-  wd.sector_code as wind_sector,
-  wd.sector_name as wind_sector_name,
-  aq.hum,
-  aq.rain,
-  aq.press,
-  aq.rad
-from air_quality as aq
-left join {{ ref('dim_datetime_hour') }} as dt
-  on dt.observed_at = aq.observed_at
-left join {{ ref('dim_wind_direction') }} as wd
-  on (
-    (wd.wraps_around and (aq.wd10 >= wd.min_degree or aq.wd10 < wd.max_degree))
-    or
-    ((not wd.wraps_around) and aq.wd10 >= wd.min_degree and aq.wd10 < wd.max_degree)
-  )
+  grouped.*,
+  row_number() over (
+    partition by grouped.station_key, grouped.observed_date
+    order by grouped.slot_first_observed_at, grouped.hour_key, grouped.hour_occurrence_in_day
+  ) - 1 as slot_sequence_in_day
+from grouped
